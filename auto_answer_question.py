@@ -85,7 +85,7 @@ def answer(driver, index):
     if '对' in answer or '错' in answer: # 判断题
         answer_elements = question_element.find_elements(By.XPATH, './/div[@class="label clearfix"]')
         for answer_element in answer_elements:
-            if answer_element.text.strip() in answer:
+            if  answer in answer_element.text.strip():
                 answer_element.click()
                 time.sleep(random.uniform(0.2, 0.5))
                 break
