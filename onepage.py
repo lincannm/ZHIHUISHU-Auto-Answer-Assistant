@@ -1,7 +1,7 @@
 from selenium.webdriver.common.by import By
 from cnocr import CnOcr
 from browser_session import get_authenticated_driver, save_login_state
-from model import get_model
+from model import get_model, should_repeat_answers
 import time
 import random
 import logging
@@ -13,6 +13,7 @@ ocr = CnOcr()
 
 # 初始化模型
 model = get_model()
+REPEAT_UNTIL_DUPLICATE = should_repeat_answers()
 
 def error_handler(func):
     def wrapper(*args, **kwargs):
@@ -43,6 +44,11 @@ def get_answer(question):
 {question}
 
 你的答案："""
+    if not REPEAT_UNTIL_DUPLICATE:
+        cur_answer = model.get_response(prompt)
+        print(f'大模型第1次输出：{cur_answer}')
+        return cur_answer
+
     answer_list = []
     index = 0
     while True:

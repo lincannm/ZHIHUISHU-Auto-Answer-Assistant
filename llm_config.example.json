@@ -12,6 +12,9 @@
     "top_p": 0.95,
     "max_tokens": 4096
   },
+  "answer": {
+    "repeat_until_duplicate": true
+  },
   "tools": {
     "web_search": {
       "enabled": true,

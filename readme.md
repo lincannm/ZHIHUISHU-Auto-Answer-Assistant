@@ -20,7 +20,7 @@
 5. 脚本对题目区域截图
 6. `cnocr` 识别题目文字
 7. 将题目发送给 LLM
-8. LLM 多次生成答案，最先重复出现的答案被视为最终答案
+8. 根据 `answer.repeat_until_duplicate` 决定是单次生成答案，还是多次生成并以最先重复出现的答案为最终答案
 9. Selenium 将答案点击回网页
 10. 用户手动确认提交
 
@@ -50,6 +50,9 @@ pip install -r requirements.txt
     "temperature": 1,
     "top_p": 0.95,
     "max_tokens": 4096
+  },
+  "answer": {
+    "repeat_until_duplicate": true
   },
   "tools": {
     "web_search": {
@@ -86,6 +89,7 @@ pip install -r requirements.txt
 - `llm.system_prompt`: 系统级约束，用来强制模型只输出最终答案
 - `llm.timeout`: 请求超时时间，单位秒
 - `request`: 统一请求参数，会直接合并到请求体
+- `answer.repeat_until_duplicate`: 是否对同一题反复请求模型，直到某个答案再次出现；设为 `false` 时每题只请求一次
 - `tools.web_search.enabled`: 是否启用智谱联网搜索工具
 - `tools.web_search.mode`: `auto` / `chat_tool` / `standalone`
 - `tools.web_search.api_key`: 独立的智谱 API Key；非智谱模型使用联网搜索时必须配置

@@ -422,5 +422,15 @@ def load_config(config_path=CONFIG_PATH):
 
 
 @lru_cache(maxsize=1)
+def get_config():
+    return load_config()
+
+
+def should_repeat_answers():
+    answer_config = get_config().get("answer", {})
+    return answer_config.get("repeat_until_duplicate", True)
+
+
+@lru_cache(maxsize=1)
 def get_model():
-    return LLMClient(load_config())
+    return LLMClient(get_config())
