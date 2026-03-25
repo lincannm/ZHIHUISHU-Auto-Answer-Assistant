@@ -1,0 +1,31 @@
+{
+  "llm": {
+    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+    "chat_endpoint": "/chat/completions",
+    "api_key": "YOUR_API_KEY",
+    "model": "glm-4-air",
+    "timeout": 60
+  },
+  "request": {
+    "temperature": 1,
+    "top_p": 0.95,
+    "max_tokens": 1024
+  },
+  "tools": {
+    "web_search": {
+      "enabled": true,
+      "mode": "auto",
+      "api_key": "YOUR_ZHIPU_API_KEY",
+      "base_url": "https://open.bigmodel.cn/api/paas/v4",
+      "endpoint": "/web_search",
+      "tool_choice": "auto",
+      "prompt_template": "以下是与题目相关的联网搜索结果：\n======\n{search_result}\n======\n请仅将这些搜索结果作为辅助参考。如果搜索结果与题目无关或不足以判断，请忽略它们，并仍然严格按照原要求作答。\n\n{query}",
+      "options": {
+        "search_engine": "search_pro",
+        "count": 5,
+        "search_recency_filter": "noLimit",
+        "content_size": "medium"
+      }
+    }
+  }
+}
