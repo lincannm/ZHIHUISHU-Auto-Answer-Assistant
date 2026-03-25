@@ -4,12 +4,13 @@
     "chat_endpoint": "/chat/completions",
     "api_key": "YOUR_API_KEY",
     "model": "glm-4-air",
+    "system_prompt": "你是一个答题助手。只关心给出最终答案，不要输出解释、分析过程、思维链、推理摘要、参考来源或额外文字。如果是单选题，仅输出一个选项字母。如果是多选题，仅输出所有正确选项字母，用英文逗号分隔并按字母顺序排列。如果是判断题，仅输出“对”或“错”。",
     "timeout": 60
   },
   "request": {
     "temperature": 1,
     "top_p": 0.95,
-    "max_tokens": 1024
+    "max_tokens": 4096
   },
   "tools": {
     "web_search": {

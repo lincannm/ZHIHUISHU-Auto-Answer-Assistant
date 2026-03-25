@@ -43,12 +43,13 @@ pip install -r requirements.txt
     "chat_endpoint": "/chat/completions",
     "api_key": "YOUR_API_KEY",
     "model": "glm-4-air",
+    "system_prompt": "你是一个答题助手。只关心给出最终答案，不要输出解释、分析过程、思维链、推理摘要、参考来源或额外文字。如果是单选题，仅输出一个选项字母。如果是多选题，仅输出所有正确选项字母，用英文逗号分隔并按字母顺序排列。如果是判断题，仅输出“对”或“错”。",
     "timeout": 60
   },
   "request": {
     "temperature": 1,
     "top_p": 0.95,
-    "max_tokens": 1024
+    "max_tokens": 4096
   },
   "tools": {
     "web_search": {
@@ -64,6 +65,12 @@ pip install -r requirements.txt
         "count": 5,
         "search_recency_filter": "noLimit",
         "content_size": "medium"
+      },
+      "render": {
+        "result_limit": 3,
+        "title_max_chars": 80,
+        "content_max_chars": 220,
+        "include_link": false
       }
     }
   }
@@ -76,6 +83,7 @@ pip install -r requirements.txt
 - `llm.chat_endpoint`: 对话补全接口路径
 - `llm.api_key`: API Key
 - `llm.model`: 模型名
+- `llm.system_prompt`: 系统级约束，用来强制模型只输出最终答案
 - `llm.timeout`: 请求超时时间，单位秒
 - `request`: 统一请求参数，会直接合并到请求体
 - `tools.web_search.enabled`: 是否启用智谱联网搜索工具
@@ -87,6 +95,7 @@ pip install -r requirements.txt
 - `tools.web_search.prompt_template`: 独立搜索模式下，如何把搜索结果注入到最终提问中
 - `tools.web_search.options`: 智谱 Web Search API 的配置项
 - `request.temperature`: 某些模型只接受 `1`，如果服务端报温度参数错误，优先改成 `1`
+- `request.max_tokens`: 推理模型如果频繁出现 `finish_reason = length`，需要适当调大
 
 ### 切换其他模型提供商
 
@@ -134,6 +143,7 @@ python auto_answer_question.py
 - 页面题目区域仍然依赖 OCR，识别错误会直接影响答题结果
 - 智慧树页面部分元素处于 `shadow-root (closed)` 中，因此当前方案仍然依赖截图识别
 - 联网搜索会提升信息覆盖面，但也可能让模型更容易输出解释性文本，建议按实际效果调整 `prompt_template`
+- 推理模型若返回空 `content` 且 `finish_reason = length`，当前代码会自动放大 `max_tokens` 重试一次，并在必要时尝试从推理结果中提取最终答案
 - `llm_config.json` 已加入 `.gitignore`，避免误提交真实密钥
 
 ## 参考文档

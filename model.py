@@ -1,4 +1,5 @@
 import json
+import re
 from functools import lru_cache
 from pathlib import Path
 from uuid import uuid4
@@ -10,6 +11,15 @@ ROOT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT_DIR / "llm_config.json"
 DEFAULT_WEB_SEARCH_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
 DEFAULT_WEB_SEARCH_ENDPOINT = "/web_search"
+DEFAULT_RETRY_MIN_MAX_TOKENS = 4096
+DEFAULT_RETRY_MAX_TOKENS = 8192
+DEFAULT_SYSTEM_PROMPT = (
+    "你是一个答题助手。"
+    "只关心给出最终答案，不要输出解释、分析过程、思维链、推理摘要、参考来源或额外文字。"
+    "如果是单选题，仅输出一个选项字母。"
+    "如果是多选题，仅输出所有正确选项字母，用英文逗号分隔并按字母顺序排列。"
+    "如果是判断题，仅输出“对”或“错”。"
+)
 DEFAULT_WEB_SEARCH_PROMPT_TEMPLATE = """以下是与题目相关的联网搜索结果：
 ======
 {search_result}
@@ -27,6 +37,7 @@ class LLMClient:
         self.api_key = llm_config.get("api_key", "").strip()
         self.model = llm_config.get("model", "").strip()
         self.timeout = llm_config.get("timeout", 60)
+        self.system_prompt = llm_config.get("system_prompt", DEFAULT_SYSTEM_PROMPT).strip()
         self.request_defaults = config.get("request", {})
         self.extra_headers = llm_config.get("headers", {})
         self.web_search_config = config.get("tools", {}).get("web_search", {})
@@ -104,7 +115,11 @@ class LLMClient:
         if overrides:
             payload.update(overrides)
         payload["model"] = self.model
-        payload["messages"] = [{"role": "user", "content": query}]
+        messages = []
+        if self.system_prompt:
+            messages.append({"role": "system", "content": self.system_prompt})
+        messages.append({"role": "user", "content": query})
+        payload["messages"] = messages
 
         tools, tool_choice = self._build_tools()
         if tools:
@@ -121,6 +136,13 @@ class LLMClient:
             json=payload,
             timeout=self.timeout,
         )
+
+    @staticmethod
+    def _extract_choice(response_data):
+        choices = response_data.get("choices", [])
+        if not choices:
+            raise RuntimeError(f"LLM API 响应缺少 choices: {response_data}")
+        return choices[0]
 
     def _build_web_search_headers(self):
         api_key = self._get_web_search_api_key()
@@ -189,8 +211,7 @@ class LLMClient:
             return value.strip()
         return str(value).strip()
 
-    @staticmethod
-    def _format_search_results(search_results):
+    def _format_search_results(self, search_results):
         lines = []
         for index, item in enumerate(search_results, start=1):
             title = LLMClient._stringify(item.get("title"))
@@ -265,6 +286,23 @@ class LLMClient:
         return ""
 
     @staticmethod
+    def _extract_reasoning_content(message):
+        reasoning_content = message.get("reasoning_content", "")
+        if isinstance(reasoning_content, str):
+            return reasoning_content.strip()
+        if isinstance(reasoning_content, list):
+            parts = []
+            for item in reasoning_content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "\n".join(part.strip() for part in parts if part and part.strip()).strip()
+        return ""
+
+    @staticmethod
     def _should_retry_with_temperature_one(response_text, payload):
         temperature = payload.get("temperature")
         if temperature in (None, 1, 1.0):
@@ -272,6 +310,64 @@ class LLMClient:
 
         text = response_text.lower()
         return "invalid temperature" in text and "only 1 is allowed" in text
+
+    @staticmethod
+    def _should_retry_for_truncated_response(choice, content):
+        return not content and choice.get("finish_reason") == "length"
+
+    @staticmethod
+    def _get_retry_max_tokens(payload):
+        current = payload.get("max_tokens")
+        if isinstance(current, int) and current > 0:
+            return min(max(current * 2, DEFAULT_RETRY_MIN_MAX_TOKENS), DEFAULT_RETRY_MAX_TOKENS)
+        return DEFAULT_RETRY_MIN_MAX_TOKENS
+
+    @staticmethod
+    def _normalize_answer(answer):
+        answer = answer.strip().upper().replace("，", ",")
+        answer = re.sub(r"\s+", "", answer)
+        if answer in {"对", "错"}:
+            return answer
+        if re.fullmatch(r"[A-D](?:,[A-D])*", answer):
+            parts = []
+            for item in answer.split(","):
+                if item not in parts:
+                    parts.append(item)
+            return ",".join(parts)
+        return ""
+
+    def _extract_answer_from_reasoning(self, reasoning_content):
+        if not reasoning_content:
+            return ""
+
+        patterns = [
+            r"(?:最终答案|答案|所以答案|因此答案|故答案)[：:\s]*([A-D](?:\s*[，,]\s*[A-D])*)",
+            r"(?:最终答案|答案|所以答案|因此答案|故答案)[：:\s]*([对错])",
+        ]
+        for pattern in patterns:
+            matches = re.findall(pattern, reasoning_content, flags=re.IGNORECASE)
+            if not matches:
+                continue
+            candidate = self._normalize_answer(matches[-1])
+            if candidate:
+                return candidate
+
+        lines = [line.strip("：:。；;，, ") for line in reasoning_content.splitlines() if line.strip()]
+        for line in reversed(lines):
+            candidate = self._normalize_answer(line)
+            if candidate:
+                return candidate
+
+        return ""
+
+    def _parse_response(self, response_data):
+        choice = self._extract_choice(response_data)
+        message = choice.get("message", {})
+        return {
+            "choice": choice,
+            "content": self._extract_text_content(message),
+            "reasoning_content": self._extract_reasoning_content(message),
+        }
 
     def get_response(self, query):
         query = self._prepare_query(query)
@@ -288,16 +384,31 @@ class LLMClient:
             raise RuntimeError(f"LLM API 请求失败: {response.text}") from exc
 
         response_data = response.json()
-        choices = response_data.get("choices", [])
-        if not choices:
-            raise RuntimeError(f"LLM API 响应缺少 choices: {response_data}")
+        parsed = self._parse_response(response_data)
+        if parsed["content"]:
+            return parsed["content"]
 
-        message = choices[0].get("message", {})
-        content = self._extract_text_content(message)
-        if not content:
-            raise RuntimeError(f"LLM API 响应中未提取到文本内容: {response_data}")
+        if self._should_retry_for_truncated_response(parsed["choice"], parsed["content"]):
+            retry_payload = self._build_payload(
+                query,
+                overrides={"max_tokens": self._get_retry_max_tokens(payload)},
+            )
+            retry_response = self._post_chat(retry_payload)
+            try:
+                retry_response.raise_for_status()
+            except requests.HTTPError as exc:
+                raise RuntimeError(f"LLM API 请求失败: {retry_response.text}") from exc
 
-        return content
+            response_data = retry_response.json()
+            parsed = self._parse_response(response_data)
+            if parsed["content"]:
+                return parsed["content"]
+
+        fallback_answer = self._extract_answer_from_reasoning(parsed["reasoning_content"])
+        if fallback_answer:
+            return fallback_answer
+
+        raise RuntimeError(f"LLM API 响应中未提取到文本内容: {response_data}")
 
 
 def load_config(config_path=CONFIG_PATH):
