@@ -1,10 +1,7 @@
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from model import get_model
 from cnocr import CnOcr
+from browser_session import get_authenticated_driver, save_login_state
+from model import get_model
 import time
 import random
 import logging
@@ -26,17 +23,6 @@ def error_handler(func):
                 print(f"函数 {func.__name__} 发生错误: {e}")
                 input("请修复错误并按回车键继续...")
     return wrapper
-
-def get_driver(url):
-    options = webdriver.ChromeOptions()
-    # selenium尝试连接https网站时会报SSL handshake failed, 加上以下两行代码可以忽略证书错误
-    options.add_argument('--ignore-certificate-errors')
-    # 设置日志级别为3, 仅记录警告和错误
-    options.add_argument('--log-level=3')
-    driver = webdriver.Chrome(options=options)
-    driver.get(url)
-    time.sleep(random.uniform(0.5, 2))
-    return driver
 
 def text_orc(image='question.png'):
     ocr_results = ocr.ocr(image)
@@ -119,8 +105,10 @@ def auto_answer(driver):
 
 if __name__ == '__main__':
     url = input("请输入题目链接：")
-    driver = get_driver(url)
-    input("请登录后按回车继续...")
-    auto_answer(driver)
-    input("请按任意键退出...")
-    driver.quit()
+    driver = get_authenticated_driver(url)
+    try:
+        auto_answer(driver)
+        input("请按任意键退出...")
+    finally:
+        save_login_state(driver)
+        driver.quit()

@@ -15,8 +15,8 @@
 
 1. 读取 `llm_config.json`
 2. 初始化统一的 LLM 客户端
-3. Selenium 打开智慧树页面
-4. 用户手动登录后继续
+3. Selenium 尝试恢复本地保存的智慧树登录 cookie
+4. 若 cookie 失效或首次运行，则用户手动登录一次后继续
 5. 脚本对题目区域截图
 6. `cnocr` 识别题目文字
 7. 将题目发送给 LLM
@@ -130,10 +130,13 @@ python auto_answer_question.py
 
 运行后只需要输入页面 URL。模型信息不再通过命令行交互输入，而是统一从 `llm_config.json` 读取。
 
+首次运行或登录态失效时，脚本会提示你手动登录；登录成功后会自动把智慧树 cookie 保存到 `data/zhihuishu_cookies.json`。下次运行会先尝试恢复这份登录态，能直接进入答题页时就不再需要重复登录。
+
 ## 文件说明
 
 - `onepage.py`: 对单个测试页答题
 - `auto_answer_question.py`: 对测试列表页中的所有测试顺序答题
+- `browser_session.py`: 统一管理 Selenium 浏览器初始化与智慧树登录态 cookie 的保存/恢复
 - `model.py`: 统一 LLM 客户端和配置加载逻辑
 - `llm_config.json`: 实际使用的模型配置
 - `llm_config.example.json`: 配置模板
@@ -145,6 +148,7 @@ python auto_answer_question.py
 - 联网搜索会提升信息覆盖面，但也可能让模型更容易输出解释性文本，建议按实际效果调整 `prompt_template`
 - 推理模型若返回空 `content` 且 `finish_reason = length`，当前代码会自动放大 `max_tokens` 重试一次，并在必要时尝试从推理结果中提取最终答案
 - `llm_config.json` 已加入 `.gitignore`，避免误提交真实密钥
+- `data/zhihuishu_cookies.json` 保存的是本地登录态，已加入 `.gitignore`，不要外传
 
 ## 参考文档
 
