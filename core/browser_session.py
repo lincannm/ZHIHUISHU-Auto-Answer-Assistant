@@ -21,6 +21,7 @@ DEFAULT_BROWSER_START_TIMEOUT_MS = 25_000
 DEFAULT_NAVIGATION_TIMEOUT_MS = 30_000
 DEFAULT_ACTION_TIMEOUT_MS = 20_000
 DEFAULT_AUTO_LOGIN_WAIT_SECONDS = 8
+DEFAULT_AUTO_LOGIN_FEEDBACK_WAIT_SECONDS = 3
 DEFAULT_AUTH_STATE_SETTLE_SECONDS = 6
 PHONE_LOGIN_TAB_SELECTOR = "#qSignin"
 PHONE_LOGIN_USERNAME_SELECTOR = "#lUsername"
@@ -31,6 +32,13 @@ LOGIN_PAGE_INDICATOR_SELECTORS = (
     PHONE_LOGIN_PASSWORD_SELECTOR,
     PHONE_LOGIN_TAB_SELECTOR,
     PHONE_LOGIN_SUBMIT_SELECTOR,
+    'iframe[src*="dun.163"]',
+    'iframe[src*="cstaticdun"]',
+)
+LOGIN_YIDUN_VISIBLE_SELECTORS = (
+    ".yidun_popup",
+    ".yidun_modal",
+    ".yidun--popup",
     'iframe[src*="dun.163"]',
     'iframe[src*="cstaticdun"]',
 )
@@ -104,6 +112,46 @@ def _has_visible_selector(page, selector):
 
 def _has_any_visible_selector(page, selectors):
     return any(_has_visible_selector(page, selector) for selector in selectors)
+
+
+def _has_foreground_selector(page, selector):
+    try:
+        locator = page.locator(selector)
+        count = locator.count()
+    except Exception:
+        return False
+
+    viewport = page.viewport_size or {"width": 1920, "height": 1080}
+    viewport_width = viewport.get("width", 1920)
+    viewport_height = viewport.get("height", 1080)
+    for index in range(count):
+        try:
+            candidate = locator.nth(index)
+            if not candidate.is_visible():
+                continue
+
+            box = candidate.bounding_box()
+            if not box:
+                continue
+
+            x = box.get("x", 0)
+            y = box.get("y", 0)
+            width = box.get("width", 0)
+            height = box.get("height", 0)
+            if width <= 0 or height <= 0:
+                continue
+            if x + width <= 0 or y + height <= 0:
+                continue
+            if x >= viewport_width or y >= viewport_height:
+                continue
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _has_any_foreground_selector(page, selectors):
+    return any(_has_foreground_selector(page, selector) for selector in selectors)
 
 
 def _get_auth_state(page):
@@ -195,6 +243,83 @@ def _wait_for_login_result(page, timeout_seconds=DEFAULT_AUTO_LOGIN_WAIT_SECONDS
     return not is_login_page(page)
 
 
+def _is_login_challenge_visible(page):
+    return _has_any_foreground_selector(page, LOGIN_YIDUN_VISIBLE_SELECTORS)
+
+
+def _wait_for_login_feedback(page, timeout_seconds=DEFAULT_AUTO_LOGIN_FEEDBACK_WAIT_SECONDS):
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        if not is_login_page(page):
+            return "completed"
+        if _is_login_challenge_visible(page):
+            return "challenge_visible"
+        time.sleep(0.2)
+
+    if not is_login_page(page):
+        return "completed"
+    if _is_login_challenge_visible(page):
+        return "challenge_visible"
+    return "pending"
+
+
+def _populate_login_input(locator, value):
+    locator.wait_for(state="visible")
+    locator.click()
+    locator.fill("")
+    locator.press_sequentially(value, delay=50)
+    if locator.input_value() != value:
+        locator.fill(value)
+
+
+def _fill_phone_login_form(page, username, password):
+    username_input = page.locator(PHONE_LOGIN_USERNAME_SELECTOR)
+    password_input = page.locator(PHONE_LOGIN_PASSWORD_SELECTOR)
+
+    _populate_login_input(username_input, username)
+    _populate_login_input(password_input, password)
+    password_input.press("Tab")
+    _sleep(0.2, 0.5)
+
+
+def _click_locator_center(page, locator):
+    box = locator.bounding_box()
+    if not box:
+        raise RuntimeError("未获取到登录按钮位置。")
+
+    x = box["x"] + box["width"] / 2
+    y = box["y"] + box["height"] / 2
+    page.mouse.click(x, y)
+
+
+def _submit_phone_login(page):
+    submit_button = page.locator(PHONE_LOGIN_SUBMIT_SELECTOR).first
+    submit_button.wait_for(state="visible")
+    submit_button.scroll_into_view_if_needed()
+
+    click_strategies = (
+        ("常规点击", lambda: submit_button.click()),
+        ("强制点击", lambda: submit_button.click(force=True)),
+        ("鼠标点击", lambda: _click_locator_center(page, submit_button)),
+        ("DOM 点击", lambda: submit_button.evaluate("(element) => element.click()")),
+    )
+    for index, (label, click_action) in enumerate(click_strategies, start=1):
+        try:
+            click_action()
+        except Exception as exc:
+            log_message(f"自动登录第 {index} 次{label}失败：{exc}")
+            continue
+
+        feedback = _wait_for_login_feedback(page)
+        if feedback != "pending":
+            return feedback
+
+        log_message(f"自动登录第 {index} 次{label}后未检测到验证码弹层或页面跳转，准备重试。")
+        _sleep(0.2, 0.4)
+
+    return "pending"
+
+
 def _try_auto_login(page):
     if not is_login_page(page):
         return "already_authenticated"
@@ -204,20 +329,26 @@ def _try_auto_login(page):
         return "skipped"
 
     try:
-        page.locator(PHONE_LOGIN_TAB_SELECTOR).click()
+        phone_tab = page.locator(PHONE_LOGIN_TAB_SELECTOR)
+        phone_tab.wait_for(state="visible")
+        if "cur" not in (phone_tab.get_attribute("class") or ""):
+            phone_tab.click()
         page.locator(PHONE_LOGIN_USERNAME_SELECTOR).wait_for(state="visible")
-        page.locator(PHONE_LOGIN_USERNAME_SELECTOR).fill(username)
-        page.locator(PHONE_LOGIN_PASSWORD_SELECTOR).fill(password)
+        _fill_phone_login_form(page, username, password)
         log_message("已从配置文件自动填充智慧树手机号和密码。")
 
         if not auto_submit:
             return "filled"
 
-        page.locator(PHONE_LOGIN_SUBMIT_SELECTOR).first.click()
-        log_message("已根据配置自动点击登录。")
-        if _wait_for_login_result(page):
+        submit_feedback = _submit_phone_login(page)
+        if submit_feedback == "challenge_visible":
+            log_message("已根据配置自动点击登录，并触发验证码弹层。")
+            return "challenge_visible"
+        if submit_feedback == "completed":
+            log_message("已根据配置自动点击登录。")
             return "completed"
-        return "submitted"
+        log_message("已自动填充账号密码，但多次点击登录后仍未检测到验证码弹层或页面跳转。")
+        return "submit_not_observed"
     except Exception as exc:
         log_message(f"自动登录失败，已回退为手动登录：{exc}")
         return "failed"
@@ -435,8 +566,12 @@ def get_authenticated_session(target_url):
     prompt_text = "未检测到可用登录状态，请登录后按回车继续..."
     if auto_login_status == "filled":
         prompt_text = "已自动填充手机号和密码，请确认后登录；如页面要求滑块或验证码，也请在浏览器完成后按回车继续..."
+    elif auto_login_status == "challenge_visible":
+        prompt_text = "已自动点击登录并弹出验证码，请在浏览器完成验证后按回车继续..."
     elif auto_login_status == "submitted":
         prompt_text = "已自动提交登录请求；如页面仍要求滑块或验证码，请完成后按回车继续..."
+    elif auto_login_status == "submit_not_observed":
+        prompt_text = "已自动填充账号密码，并多次尝试点击登录，但未检测到验证码弹层，请在浏览器手动点击登录后按回车继续..."
 
     while is_login_page(session.page):
         input(prompt_text)
