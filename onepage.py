@@ -19,9 +19,7 @@ QUESTION_XPATH = '//div[contains(@class, "examPaper_subject")]'
 ANSWER_OPTION_XPATH = './/div[contains(@class, "label") and contains(@class, "clearfix")]'
 NEXT_BUTTON_XPATH = '//button[contains(@class, "el-button--primary") and contains(@class, "is-plain")]'
 SUBMIT_BUTTON_XPATH = '//button[contains(@class, "btnStyleXSumit")]'
-CONFIRM_BUTTON_XPATH = (
-    '//button[contains(@class, "el-button--primary") and contains(@class, "el-button--small")]'
-)
+SUBMIT_CONFIRM_DIALOG_XPATH = '//div[contains(@class, "el-message-box__wrapper")]'
 
 def error_handler(func):
     def wrapper(*args, **kwargs):
@@ -98,6 +96,40 @@ def get_next_button(driver, timeout=20):
 
     return wait.until(find_next_button)
 
+
+def get_submit_button(driver, timeout=20):
+    wait = WebDriverWait(driver, timeout)
+
+    def find_submit_button(current_driver):
+        buttons = current_driver.find_elements(By.XPATH, SUBMIT_BUTTON_XPATH)
+        visible_buttons = [button for button in buttons if button.is_displayed() and button.is_enabled()]
+        if visible_buttons:
+            return visible_buttons[-1]
+        return None
+
+    return wait.until(find_submit_button)
+
+
+def get_submit_confirm_button(driver, timeout=20):
+    wait = WebDriverWait(driver, timeout)
+
+    def find_submit_confirm_button(current_driver):
+        dialogs = current_driver.find_elements(By.XPATH, SUBMIT_CONFIRM_DIALOG_XPATH)
+        for dialog in dialogs:
+            if not dialog.is_displayed():
+                continue
+
+            buttons = dialog.find_elements(
+                By.XPATH,
+                './/button[contains(@class, "el-button--primary")]',
+            )
+            for button in buttons:
+                if button.is_displayed() and button.is_enabled() and button.text.strip() == '确定':
+                    return button
+        return None
+
+    return wait.until(find_submit_confirm_button)
+
 @error_handler
 def answer(driver, index):
     question_element = get_question_element(driver, index)
@@ -136,13 +168,11 @@ def auto_answer(driver):
         next_button = get_next_button(driver)
         if next_button.text.strip() == '保存':
             # 提交作业
-            submit_button = driver.find_element(By.XPATH, SUBMIT_BUTTON_XPATH)
+            submit_button = get_submit_button(driver)
             submit_button.click()
-            time.sleep(random.uniform(1, 2))
-            # driver.switch_to.alert.accept()
-            # input("请手动完成提交后按回车继续...")
-            conform_button = driver.find_element(By.XPATH, CONFIRM_BUTTON_XPATH)
-            conform_button.click()
+            time.sleep(random.uniform(0.5, 1))
+            confirm_button = get_submit_confirm_button(driver)
+            confirm_button.click()
             print("提交成功")
             return
         next_button.click()
