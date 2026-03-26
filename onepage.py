@@ -1,5 +1,5 @@
-from browser_session import get_authenticated_driver, save_login_state
-from question_flow import auto_answer
+from core.browser_session import get_authenticated_driver, save_login_state
+from core.question_flow import auto_answer
 
 if __name__ == '__main__':
     url = input("请输入题目链接：")

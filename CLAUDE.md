@@ -58,11 +58,15 @@ python auto_answer_question.py
   - 面向“测试列表页”，对多个测试顺序答题。
   - 逻辑上会复用与 `onepage.py` 相同的“题目识别 + LLM 求答 + 自动点击”流程，只是多了一层对测试列表的遍历和进入/退出单个测试页的控制。
 
-这三个入口脚本不直接实现复杂逻辑，而是委托给下层模块。
+这三个入口脚本不直接实现复杂逻辑，而是委托给 `core/` 包中的下层模块。
 
-### 2. 浏览器与登录态管理
+### 2. 共享模块包 `core/`
 
-- `browser_session.py`
+所有非入口的业务模块都放在 `core/` 包中，入口脚本通过 `from core.xxx import ...` 引用，包内模块之间使用相对导入。
+
+#### 2.1 浏览器与登录态管理
+
+- `core/browser_session.py`
   - 负责 Selenium WebDriver 初始化（浏览器类型、窗口大小、超时配置等）。
   - 统一处理智慧树登录态 cookie 的「保存 / 恢复」，实际文件路径为：
     - `data/zhihuishu_cookies.json`（已写入 .gitignore）。
@@ -73,9 +77,9 @@ python auto_answer_question.py
 
 对 Selenium 相关行为（比如切换窗口、等待元素、截图等）的通用封装，也应该放在这里，而不是入口脚本里到处散落。
 
-### 3. 题目流程与共享逻辑
+#### 2.2 题目流程与共享逻辑
 
-- `question_flow.py`
+- `core/question_flow.py`
   - 封装了“读取题目 → OCR 识别 → 调用 LLM → 解析答案 → 自动答题”的共享流程，供 `manual_mode.py` / `onepage.py` / `auto_answer_question.py` 复用。
   - 典型职责：
     - 根据当前页面结构与题目区域定位规则，对题目区域进行截图；
@@ -87,9 +91,9 @@ python auto_answer_question.py
 
 修改页面结构适配（例如智慧树改版导致题目在不同的 DOM 或截图区域），一般都在这里集中调整，而不是分别改三个入口脚本。
 
-### 4. 统一 LLM 客户端与配置
+#### 2.3 统一 LLM 客户端与配置
 
-- `model.py`
+- `core/model.py`
   - 提供统一的 `LLMClient` / 配置加载逻辑，是整个项目与各类大模型服务交互的抽象层。
   - 职责包含：
     - 从 `llm_config.json` 读取配置：`llm`、`request`、`answer`、`logging`、`tools.web_search` 等字段；
@@ -104,9 +108,9 @@ python auto_answer_question.py
   - 提供完整的配置字段示例与说明，关键点已在 `readme.md` 里写明。
   - 实际使用时，一般拷贝为 `llm_config.json` 并填入真实 API Key 等。
 
-项目中不再有按模型提供商拆分的 `LLMs/*.py`，所有模型调用路径都应走 `model.py`，避免在业务代码里直接拼 HTTP 请求。
+项目中不再有按模型提供商拆分的 `LLMs/*.py`，所有模型调用路径都应走 `core/model.py`，避免在业务代码里直接拼 HTTP 请求。
 
-### 5. 日志与数据文件
+### 3. 日志与数据文件
 
 - LLM 和联网搜索日志：`data/logs/llm.log`
 - 智慧树登录 cookie：`data/zhihuishu_cookies.json`
@@ -118,5 +122,5 @@ python auto_answer_question.py
 ## 对未来 Claude Code 实例的建议
 
 - 在修改逻辑前，优先查阅 `readme.md`，那是项目行为与配置的权威说明；
-- 如需扩展功能（比如增加新的答题模式），优先考虑复用并扩展 `browser_session.py` 与 `question_flow.py`，而不是在入口脚本里写大量重复代码；
-- 与 LLM/联网搜索有关的改动，统一集中在 `model.py` 与 `llm_config.example.json`，保持业务层仅依赖抽象的 LLM 客户端与少量配置字段。
+- 如需扩展功能（比如增加新的答题模式），优先考虑复用并扩展 `core/browser_session.py` 与 `core/question_flow.py`，而不是在入口脚本里写大量重复代码；
+- 与 LLM/联网搜索有关的改动，统一集中在 `core/model.py` 与 `llm_config.example.json`，保持业务层仅依赖抽象的 LLM 客户端与少量配置字段。

@@ -10,7 +10,7 @@ from uuid import uuid4
 import requests
 
 
-ROOT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT_DIR / "llm_config.json"
 DEFAULT_LLM_LOG_PATH = ROOT_DIR / "data" / "logs" / "llm.log"
 DEFAULT_WEB_SEARCH_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"

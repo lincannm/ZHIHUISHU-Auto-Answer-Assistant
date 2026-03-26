@@ -7,7 +7,7 @@
 当前版本已经移除原来按模型提供商拆分的 `LLMs/*.py` 实现，改成统一的配置文件和统一的 API 客户端：
 
 - 所有模型参数都放在 `llm_config.json`
-- 所有对话请求都通过 `model.py` 中的统一 `LLMClient` 发送
+- 所有对话请求都通过 `core/model.py` 中的统一 `LLMClient` 发送
 - 已接入智谱官方 `web_search` 能力，可在配置文件中开启或关闭
 - 非 GLM 模型会自动改走“先调用智谱 Web Search API，再把结果注入目标模型提示词”的两段式流程
 
@@ -183,9 +183,11 @@ python auto_answer_question.py
 - `manual_mode.py`: 手动模式入口，只在收到命令时回答当前题目，不做自动点击或提交
 - `onepage.py`: 对单个测试页答题
 - `auto_answer_question.py`: 对测试列表页中的所有测试顺序答题
-- `browser_session.py`: 统一管理 Selenium 浏览器初始化与智慧树登录态 cookie 的保存/恢复
-- `question_flow.py`: 共享的题目识别、OCR、AI 求答和自动答题流程
-- `model.py`: 统一 LLM 客户端和配置加载逻辑
+- `core/`: 共享模块包
+  - `core/browser_session.py`: 统一管理 Selenium 浏览器初始化与智慧树登录态 cookie 的保存/恢复
+  - `core/question_flow.py`: 共享的题目识别、OCR、AI 求答和自动答题流程
+  - `core/model.py`: 统一 LLM 客户端和配置加载逻辑
+  - `core/answer_context.py`: 答题 prompt 构建与课程名称识别
 - `llm_config.json`: 实际使用的模型配置
 - `llm_config.example.json`: 配置模板
 - `data/logs/llm.log`: LLM 与 web_search 的请求/响应日志

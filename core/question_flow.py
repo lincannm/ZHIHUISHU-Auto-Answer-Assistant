@@ -7,8 +7,8 @@ from cnocr import CnOcr
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 
-from answer_context import build_answer_prompt, get_course_name
-from model import get_model, should_repeat_answers
+from .answer_context import build_answer_prompt, get_course_name
+from .model import get_model, should_repeat_answers
 
 
 logging.getLogger("selenium").setLevel(logging.WARNING)
@@ -21,7 +21,8 @@ ANSWER_OPTION_XPATH = './/div[contains(@class, "label") and contains(@class, "cl
 NEXT_BUTTON_XPATH = '//button[contains(@class, "el-button--primary") and contains(@class, "is-plain")]'
 SUBMIT_BUTTON_XPATH = '//button[contains(@class, "btnStyleXSumit")]'
 SUBMIT_CONFIRM_DIALOG_XPATH = '//div[contains(@class, "el-message-box__wrapper")]'
-QUESTION_SCREENSHOT_PATH = Path("data") / "question.png"
+ROOT_DIR = Path(__file__).resolve().parent.parent
+QUESTION_SCREENSHOT_PATH = ROOT_DIR / "data" / "question.png"
 
 
 def error_handler(func):

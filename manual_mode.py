@@ -1,6 +1,6 @@
-from answer_context import get_course_name
-from browser_session import get_authenticated_driver, save_login_state
-from question_flow import (
+from core.answer_context import get_course_name
+from core.browser_session import get_authenticated_driver, save_login_state
+from core.question_flow import (
     capture_question_text,
     get_answer,
     get_current_question_element,

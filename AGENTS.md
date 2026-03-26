@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-This repository is a small Python automation project built around Selenium, OCR, and an LLM API. The two entry points are `onepage.py` for a single exam page and `auto_answer_question.py` for walking a full test list. Shared logic lives in `model.py` (LLM client and config), `browser_session.py` (Chrome startup and cookie persistence), and `answer_context.py` (prompt assembly and course context).
+This repository is a small Python automation project built around Selenium, OCR, and an LLM API. The three entry points are `manual_mode.py` for manual mode, `onepage.py` for a single exam page, and `auto_answer_question.py` for walking a full test list. Shared logic lives in the `core/` package: `core/model.py` (LLM client and config), `core/browser_session.py` (Chrome startup and cookie persistence), `core/question_flow.py` (question answering flow), and `core/answer_context.py` (prompt assembly and course context).
 
 Keep generated assets under `data/`, including screenshots, demo media, cookies, and logs. Use `llm_config.example.json` as the template for local setup; `llm_config.json` is local-only and ignored by Git.
 
@@ -19,7 +19,7 @@ Run the main workflows with:
 ```powershell
 python onepage.py
 python auto_answer_question.py
-python -m py_compile answer_context.py auto_answer_question.py browser_session.py model.py onepage.py
+python -m py_compile core/__init__.py core/answer_context.py core/browser_session.py core/model.py core/question_flow.py auto_answer_question.py manual_mode.py onepage.py
 ```
 
 The first two commands are manual smoke tests. The `py_compile` check is the quickest way to catch syntax errors before a commit.

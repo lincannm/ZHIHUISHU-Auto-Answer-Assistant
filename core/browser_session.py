@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 from selenium import webdriver
 
 
-ROOT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = Path(__file__).resolve().parent.parent
 COOKIE_STORE_PATH = ROOT_DIR / "data" / "zhihuishu_cookies.json"
 COOKIE_FIELDS = {"name", "value", "path", "domain", "secure", "httpOnly", "expiry", "sameSite"}
 

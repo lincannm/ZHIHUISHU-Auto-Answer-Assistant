@@ -1,8 +1,8 @@
 from selenium.webdriver.common.by import By
-from browser_session import get_authenticated_driver, save_login_state
+from core.browser_session import get_authenticated_driver, save_login_state
 import time
 import random
-from question_flow import auto_answer, error_handler
+from core.question_flow import auto_answer, error_handler
 
 
 def get_test_num(driver):
