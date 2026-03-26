@@ -1,6 +1,9 @@
 import json
+import logging
 import re
+import time
 from functools import lru_cache
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from uuid import uuid4
 
@@ -9,10 +12,15 @@ import requests
 
 ROOT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT_DIR / "llm_config.json"
+DEFAULT_LLM_LOG_PATH = ROOT_DIR / "data" / "logs" / "llm.log"
 DEFAULT_WEB_SEARCH_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
 DEFAULT_WEB_SEARCH_ENDPOINT = "/web_search"
 DEFAULT_RETRY_MIN_MAX_TOKENS = 4096
 DEFAULT_RETRY_MAX_TOKENS = 8192
+DEFAULT_LOG_MAX_BYTES = 5 * 1024 * 1024
+DEFAULT_LOG_BACKUP_COUNT = 3
+DEFAULT_LOG_MAX_BODY_CHARS = 20000
+MASKED_VALUE = "***REDACTED***"
 DEFAULT_SYSTEM_PROMPT = (
     "你是一个答题助手。"
     "只关心给出最终答案，不要输出解释、分析过程、思维链、推理摘要、参考来源或额外文字。"
@@ -29,6 +37,81 @@ DEFAULT_WEB_SEARCH_PROMPT_TEMPLATE = """以下是与题目相关的联网搜索�
 {query}"""
 
 
+def _resolve_log_level(level_name):
+    if not isinstance(level_name, str):
+        return logging.INFO
+    return getattr(logging, level_name.upper(), logging.INFO)
+
+
+def _resolve_log_path(path_value):
+    path = Path(path_value) if path_value else DEFAULT_LLM_LOG_PATH
+    if not path.is_absolute():
+        path = ROOT_DIR / path
+    return path
+
+
+def _safe_int(value, default):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _sanitize_log_value(value, max_chars):
+    if isinstance(value, dict):
+        sanitized = {}
+        for key, item in value.items():
+            if isinstance(key, str) and key.lower() in {"authorization", "api_key"}:
+                sanitized[key] = MASKED_VALUE
+            else:
+                sanitized[key] = _sanitize_log_value(item, max_chars)
+        return sanitized
+
+    if isinstance(value, list):
+        return [_sanitize_log_value(item, max_chars) for item in value]
+
+    if isinstance(value, tuple):
+        return tuple(_sanitize_log_value(item, max_chars) for item in value)
+
+    if isinstance(value, str) and max_chars > 0 and len(value) > max_chars:
+        truncated_length = len(value) - max_chars
+        return f"{value[:max_chars]}...(truncated {truncated_length} chars)"
+
+    return value
+
+
+def _build_llm_logger(log_config):
+    if not log_config.get("enabled", True):
+        return None
+
+    logger = logging.getLogger("zhihuishu_auto_answer.llm")
+    logger.setLevel(_resolve_log_level(log_config.get("level", "INFO")))
+    logger.propagate = False
+
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
+
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+
+    if log_config.get("console", True):
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(formatter)
+        logger.addHandler(stream_handler)
+
+    log_path = _resolve_log_path(log_config.get("path"))
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    file_handler = RotatingFileHandler(
+        log_path,
+        maxBytes=_safe_int(log_config.get("max_bytes"), DEFAULT_LOG_MAX_BYTES),
+        backupCount=_safe_int(log_config.get("backup_count"), DEFAULT_LOG_BACKUP_COUNT),
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    return logger
+
+
 class LLMClient:
     def __init__(self, config):
         llm_config = config.get("llm", {})
@@ -41,9 +124,15 @@ class LLMClient:
         self.request_defaults = config.get("request", {})
         self.extra_headers = llm_config.get("headers", {})
         self.web_search_config = config.get("tools", {}).get("web_search", {})
+        self.log_config = config.get("logging", {})
         self.session = requests.Session()
         self.prompt_cache = {}
         self.web_search_warning_shown = False
+        self.log_max_body_chars = _safe_int(
+            self.log_config.get("max_body_chars"),
+            DEFAULT_LOG_MAX_BODY_CHARS,
+        )
+        self.logger = _build_llm_logger(self.log_config)
 
         if not self.base_url:
             raise ValueError("llm_config.json 缺少 llm.base_url。")
@@ -62,7 +151,61 @@ class LLMClient:
         if self.web_search_warning_shown:
             return
         print(message)
+        self._log_event("warning", level=logging.WARNING, message=message)
         self.web_search_warning_shown = True
+
+    def _log_event(self, event_type, level=logging.INFO, **payload):
+        if not self.logger:
+            return
+
+        message = json.dumps(
+            _sanitize_log_value({"event": event_type, **payload}, self.log_max_body_chars),
+            ensure_ascii=False,
+            indent=2,
+        )
+        self.logger.log(level, message)
+
+    @staticmethod
+    def _get_response_body(response):
+        try:
+            return response.json()
+        except ValueError:
+            return response.text
+
+    def _log_request(self, event_type, request_id, attempt, url, payload):
+        self._log_event(
+            event_type,
+            request_id=request_id,
+            attempt=attempt,
+            method="POST",
+            url=url,
+            payload=payload,
+        )
+
+    def _log_response(self, event_type, request_id, attempt, url, response, elapsed_ms):
+        self._log_event(
+            event_type,
+            request_id=request_id,
+            attempt=attempt,
+            method="POST",
+            url=url,
+            status_code=response.status_code,
+            ok=response.ok,
+            elapsed_ms=round(elapsed_ms, 2),
+            body=self._get_response_body(response),
+        )
+
+    def _log_request_error(self, event_type, request_id, attempt, url, elapsed_ms, error):
+        self._log_event(
+            event_type,
+            level=logging.ERROR,
+            request_id=request_id,
+            attempt=attempt,
+            method="POST",
+            url=url,
+            elapsed_ms=round(elapsed_ms, 2),
+            error=str(error),
+        )
 
     def _get_web_search_mode(self):
         if not self.web_search_config.get("enabled", False):
@@ -129,13 +272,38 @@ class LLMClient:
 
         return payload
 
-    def _post_chat(self, payload):
-        return self.session.post(
-            f"{self.base_url}{self.chat_endpoint}",
-            headers=self._build_headers(),
-            json=payload,
-            timeout=self.timeout,
+    def _post_chat(self, payload, request_id=None, attempt=1):
+        url = f"{self.base_url}{self.chat_endpoint}"
+        request_id = request_id or str(uuid4())
+        self._log_request("llm_request", request_id, attempt, url, payload)
+        started_at = time.perf_counter()
+        try:
+            response = self.session.post(
+                url,
+                headers=self._build_headers(),
+                json=payload,
+                timeout=self.timeout,
+            )
+        except requests.RequestException as exc:
+            self._log_request_error(
+                "llm_request_error",
+                request_id,
+                attempt,
+                url,
+                time.perf_counter() - started_at,
+                exc,
+            )
+            raise
+
+        self._log_response(
+            "llm_response",
+            request_id,
+            attempt,
+            url,
+            response,
+            time.perf_counter() - started_at,
         )
+        return response
 
     @staticmethod
     def _extract_choice(response_data):
@@ -191,11 +359,36 @@ class LLMClient:
 
         base_url = self.web_search_config.get("base_url", DEFAULT_WEB_SEARCH_BASE_URL).rstrip("/")
         endpoint = self.web_search_config.get("endpoint", DEFAULT_WEB_SEARCH_ENDPOINT)
-        response = self.session.post(
-            f"{base_url}{endpoint}",
-            headers=headers,
-            json=self._build_web_search_payload(query),
-            timeout=self.timeout,
+        url = f"{base_url}{endpoint}"
+        payload = self._build_web_search_payload(query)
+        request_id = payload.get("request_id") or str(uuid4())
+        self._log_request("web_search_request", request_id, 1, url, payload)
+        started_at = time.perf_counter()
+        try:
+            response = self.session.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=self.timeout,
+            )
+        except requests.RequestException as exc:
+            self._log_request_error(
+                "web_search_request_error",
+                request_id,
+                1,
+                url,
+                time.perf_counter() - started_at,
+                exc,
+            )
+            raise
+
+        self._log_response(
+            "web_search_response",
+            request_id,
+            1,
+            url,
+            response,
+            time.perf_counter() - started_at,
         )
         if not response.ok:
             self._warn_once(f"web_search 请求失败，已跳过联网搜索: {response.text}")
@@ -371,12 +564,22 @@ class LLMClient:
 
     def get_response(self, query):
         query = self._prepare_query(query)
+        request_id = str(uuid4())
         payload = self._build_payload(query)
-        response = self._post_chat(payload)
+        attempt = 1
+        response = self._post_chat(payload, request_id=request_id, attempt=attempt)
 
         if not response.ok and self._should_retry_with_temperature_one(response.text, payload):
+            attempt += 1
+            self._log_event(
+                "llm_retry",
+                level=logging.WARNING,
+                request_id=request_id,
+                attempt=attempt,
+                reason="service_only_accepts_temperature_1",
+            )
             payload = self._build_payload(query, overrides={"temperature": 1})
-            response = self._post_chat(payload)
+            response = self._post_chat(payload, request_id=request_id, attempt=attempt)
 
         try:
             response.raise_for_status()
@@ -389,11 +592,20 @@ class LLMClient:
             return parsed["content"]
 
         if self._should_retry_for_truncated_response(parsed["choice"], parsed["content"]):
+            attempt += 1
             retry_payload = self._build_payload(
                 query,
                 overrides={"max_tokens": self._get_retry_max_tokens(payload)},
             )
-            retry_response = self._post_chat(retry_payload)
+            self._log_event(
+                "llm_retry",
+                level=logging.WARNING,
+                request_id=request_id,
+                attempt=attempt,
+                reason="empty_content_and_finish_reason_length",
+                max_tokens=retry_payload.get("max_tokens"),
+            )
+            retry_response = self._post_chat(retry_payload, request_id=request_id, attempt=attempt)
             try:
                 retry_response.raise_for_status()
             except requests.HTTPError as exc:
@@ -406,6 +618,14 @@ class LLMClient:
 
         fallback_answer = self._extract_answer_from_reasoning(parsed["reasoning_content"])
         if fallback_answer:
+            self._log_event(
+                "llm_answer_fallback",
+                level=logging.WARNING,
+                request_id=request_id,
+                attempt=attempt,
+                answer=fallback_answer,
+                source="reasoning_content",
+            )
             return fallback_answer
 
         raise RuntimeError(f"LLM API 响应中未提取到文本内容: {response_data}")

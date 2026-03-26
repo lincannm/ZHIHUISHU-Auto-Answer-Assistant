@@ -54,6 +54,15 @@ pip install -r requirements.txt
   "answer": {
     "repeat_until_duplicate": true
   },
+  "logging": {
+    "enabled": true,
+    "console": true,
+    "path": "data/logs/llm.log",
+    "level": "INFO",
+    "max_bytes": 5242880,
+    "backup_count": 3,
+    "max_body_chars": 20000
+  },
   "tools": {
     "web_search": {
       "enabled": true,
@@ -90,6 +99,13 @@ pip install -r requirements.txt
 - `llm.timeout`: 请求超时时间，单位秒
 - `request`: 统一请求参数，会直接合并到请求体
 - `answer.repeat_until_duplicate`: 是否对同一题反复请求模型，直到某个答案再次出现；设为 `false` 时每题只请求一次
+- `logging.enabled`: 是否启用 LLM / web_search 请求日志
+- `logging.console`: 是否同步输出到控制台
+- `logging.path`: 日志文件路径，默认写入 `data/logs/llm.log`
+- `logging.level`: 日志级别，通常使用 `INFO`
+- `logging.max_bytes`: 单个日志文件的最大体积，超过后自动轮转
+- `logging.backup_count`: 最多保留多少个历史日志文件
+- `logging.max_body_chars`: 单条日志中请求/响应文本的最大字符数，超过后截断
 - `tools.web_search.enabled`: 是否启用智谱联网搜索工具
 - `tools.web_search.mode`: `auto` / `chat_tool` / `standalone`
 - `tools.web_search.api_key`: 独立的智谱 API Key；非智谱模型使用联网搜索时必须配置
@@ -120,6 +136,30 @@ pip install -r requirements.txt
 
 ## 运行
 
+### 手动模式
+
+```bash
+python manual_mode.py
+```
+
+运行后输入答题页 URL，脚本会打开浏览器并复用本地保存的登录态。进入手动模式后，脚本不会自动选项、自动切题或自动提交，只会在你输入命令时读取当前正在显示的题目并调用 AI 返回答案。
+
+常用命令：
+
+- `ask` / `答题`: 回答当前正在显示的题目
+- `ask <n>` / `答题 <n>`: 仅当当前显示的是第 `n` 题时回答，否则提示你先在浏览器里手动切题
+- `show` / `看题`: 只识别当前题目文字，不调用 AI
+- `show <n>` / `看题 <n>`: 仅当当前显示的是第 `n` 题时识别
+- `list` / `count` / `题数`: 显示当前是第几题、总共有几题
+- `course` / `课程`: 显示当前识别到的课程名称
+- `help` / `帮助`: 显示命令说明
+- `quit` / `exit` / `退出`: 退出手动模式
+
+说明：
+
+- 这个页面通常一次只展开一道题，切题仍然需要你在浏览器里手动操作
+- 手动模式仍然依赖 OCR 读取题目区域，OCR 结果可能受页面样式和字体影响
+
 ### 单个测试页
 
 ```bash
@@ -136,14 +176,19 @@ python auto_answer_question.py
 
 首次运行或登录态失效时，脚本会提示你手动登录；登录成功后会自动把智慧树 cookie 保存到 `data/zhihuishu_cookies.json`。下次运行会先尝试恢复这份登录态，能直接进入答题页时就不再需要重复登录。
 
+默认会把 LLM 请求、响应、重试和错误同时输出到控制台与 `data/logs/llm.log`。日志中会保留完整 prompt / response（超长内容按 `logging.max_body_chars` 截断），并对 `api_key` / `Authorization` 做脱敏处理。
+
 ## 文件说明
 
+- `manual_mode.py`: 手动模式入口，只在收到命令时回答当前题目，不做自动点击或提交
 - `onepage.py`: 对单个测试页答题
 - `auto_answer_question.py`: 对测试列表页中的所有测试顺序答题
 - `browser_session.py`: 统一管理 Selenium 浏览器初始化与智慧树登录态 cookie 的保存/恢复
+- `question_flow.py`: 共享的题目识别、OCR、AI 求答和自动答题流程
 - `model.py`: 统一 LLM 客户端和配置加载逻辑
 - `llm_config.json`: 实际使用的模型配置
 - `llm_config.example.json`: 配置模板
+- `data/logs/llm.log`: LLM 与 web_search 的请求/响应日志
 
 ## 注意事项
 
@@ -153,6 +198,7 @@ python auto_answer_question.py
 - 推理模型若返回空 `content` 且 `finish_reason = length`，当前代码会自动放大 `max_tokens` 重试一次，并在必要时尝试从推理结果中提取最终答案
 - `llm_config.json` 已加入 `.gitignore`，避免误提交真实密钥
 - `data/zhihuishu_cookies.json` 保存的是本地登录态，已加入 `.gitignore`，不要外传
+- `data/logs/` 已加入 `.gitignore`，但日志里会包含题目、课程名和模型响应，不要外传
 
 ## 参考文档
 

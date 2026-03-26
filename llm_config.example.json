@@ -15,6 +15,15 @@
   "answer": {
     "repeat_until_duplicate": true
   },
+  "logging": {
+    "enabled": true,
+    "console": true,
+    "path": "data/logs/llm.log",
+    "level": "INFO",
+    "max_bytes": 5242880,
+    "backup_count": 3,
+    "max_body_chars": 20000
+  },
   "tools": {
     "web_search": {
       "enabled": true,
