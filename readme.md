@@ -2,7 +2,7 @@
 
 ## 项目简介
 
-这是一个基于 `Selenium + OCR + LLM API` 的智慧树自动答题脚本。
+这是一个基于 `Playwright + OCR + LLM API` 的智慧树自动答题脚本。
 
 当前版本已经移除原来按模型提供商拆分的 `LLMs/*.py` 实现，改成统一的配置文件和统一的 API 客户端：
 
@@ -15,26 +15,27 @@
 
 1. 读取 `llm_config.json`
 2. 初始化统一的 LLM 客户端
-3. Selenium 尝试恢复本地保存的智慧树登录 cookie
+3. Playwright 尝试恢复本地保存的智慧树登录状态
 4. 若 cookie 失效或首次运行，则用户手动登录一次后继续
 5. 脚本对题目区域截图
 6. `cnocr` 识别题目文字
 7. 将课程名称和题目一起发送给 LLM
 8. 根据 `answer.repeat_until_duplicate` 决定是单次生成答案，还是多次生成并以最先重复出现的答案为最终答案
-9. Selenium 将答案点击回网页
+9. Playwright 将答案点击回网页
 10. 用户手动确认提交
 
 ## 安装
 
 ```bash
 pip install -r requirements.txt
+python -m playwright install chromium
 ```
 
-浏览器驱动说明：
+浏览器运行说明：
 
-- 默认优先使用本机已安装的 Chrome，并尝试通过 Selenium Manager 自动准备驱动
-- 如果你的网络环境无法自动拉取驱动，可以把匹配当前 Chrome 版本的 `chromedriver.exe` 放到仓库根目录、`drivers/` 或 `data/` 目录
-- 也可以通过环境变量 `ZHIHUISHU_CHROMEDRIVER` 指定驱动路径，通过 `ZHIHUISHU_CHROME_BINARY` 指定 `chrome.exe` 路径
+- 默认优先使用本机已安装的 Chrome；如果未检测到，则回退到 Playwright 自带的 Chromium
+- 首次使用 Playwright 自带 Chromium 前，需要先执行 `python -m playwright install chromium`
+- 也可以通过环境变量 `ZHIHUISHU_CHROME_BINARY` 指定本机 `chrome.exe` 路径
 
 ## 配置
 
@@ -176,7 +177,7 @@ python main.py
 
 模型信息不再通过命令行交互输入，而是统一从 `llm_config.json` 读取。
 
-首次运行或登录态失效时，脚本会提示你手动登录；登录成功后会自动把智慧树 cookie 保存到 `data/zhihuishu_cookies.json`。下次运行会先尝试恢复这份登录态，能直接进入答题页时就不再需要重复登录。
+首次运行或登录态失效时，脚本会提示你手动登录；登录成功后会自动把 Playwright 登录状态保存到 `data/zhihuishu_storage_state.json`。下次运行会先尝试恢复这份登录态，能直接进入答题页时就不再需要重复登录。如果本地还保留旧版 `data/zhihuishu_cookies.json`，当前版本也会自动尝试导入一次。
 
 默认会把 LLM 请求、响应、重试和错误同时输出到控制台与 `data/logs/llm.log`。日志中会保留完整 prompt / response（超长内容按 `logging.max_body_chars` 截断），并对 `api_key` / `Authorization` 做脱敏处理。
 
@@ -193,7 +194,7 @@ python main.py
 - `auto_answer_question.py`: 兼容旧用法的薄包装，内部转调统一入口的答题列表页模式
 - `core/`: 共享模块包
   - `core/workflows.py`: 统一收口手动模式、单个答题页和答题列表页三种 workflow
-  - `core/browser_session.py`: 统一管理 Selenium 浏览器初始化与智慧树登录态 cookie 的保存/恢复
+  - `core/browser_session.py`: 统一管理 Playwright 浏览器初始化与智慧树登录态的保存/恢复
   - `core/question_flow.py`: 共享的题目识别、OCR、AI 求答和自动答题流程
   - `core/model.py`: 统一 LLM 客户端和配置加载逻辑
   - `core/answer_context.py`: 答题 prompt 构建与课程名称识别
@@ -209,7 +210,7 @@ python main.py
 - 如果模型服务不支持 `stream` 或智谱的 `tool_stream`，代码会自动回退到兼容模式；这种情况下仍能答题，但思维链或联网搜索状态不一定能实时显示
 - 推理模型若返回空 `content` 且 `finish_reason = length`，当前代码会自动放大 `max_tokens` 重试一次，并在必要时尝试从推理结果中提取最终答案
 - `llm_config.json` 已加入 `.gitignore`，避免误提交真实密钥
-- `data/zhihuishu_cookies.json` 保存的是本地登录态，已加入 `.gitignore`，不要外传
+- `data/zhihuishu_storage_state.json` 保存的是本地登录态，已加入 `.gitignore`，不要外传
 - `data/logs/` 已加入 `.gitignore`，但日志里会包含题目、课程名和模型响应，不要外传
 
 ## 参考文档

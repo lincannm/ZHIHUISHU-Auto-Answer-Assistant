@@ -1,4 +1,4 @@
-from core.browser_session import get_authenticated_driver, save_login_state
+from core.browser_session import get_authenticated_session, save_login_state
 from core.console import log_message
 from core.workflows import MODE_LABELS, normalize_mode, run_workflow
 
@@ -31,14 +31,14 @@ def prompt_url():
 def run_application(mode, url):
     normalized_mode = normalize_mode(mode)
     log_message(f"当前模式：{MODE_LABELS[normalized_mode]}")
-    driver = get_authenticated_driver(url)
+    session = get_authenticated_session(url)
     try:
-        run_workflow(normalized_mode, driver)
+        run_workflow(normalized_mode, session.page)
         if normalized_mode != "manual":
             input("流程结束，按回车退出...")
     finally:
-        save_login_state(driver)
-        driver.quit()
+        save_login_state(session)
+        session.close()
 
 
 def main():

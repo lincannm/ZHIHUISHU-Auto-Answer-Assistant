@@ -17,7 +17,7 @@ source .venv/bin/activate  # Windows 下用: .venv/Scripts/activate
 pip install -r requirements.txt
 ```
 
-> 说明：当前 `requirements.txt` 只包含运行主流程必需依赖（`requests`, `selenium`, `cnocr`）。如需增加新三方库，请同步更新该文件。
+> 说明：当前 `requirements.txt` 只包含运行主流程必需依赖（`requests`, `playwright`, `cnocr`）。如需增加新三方库，请同步更新该文件。
 
 ### 运行脚本
 
@@ -42,7 +42,7 @@ python auto_answer_question.py
 
 ## 代码结构与架构概览
 
-本项目是一个基于「Selenium + OCR + LLM API」的智慧树自动答题脚本，核心是浏览器自动化 + 截图 OCR + 调用统一 LLM 客户端。高层结构可从 `readme.md` 获取，下面是补充说明，方便之后改动：
+本项目是一个基于「Playwright + OCR + LLM API」的智慧树自动答题脚本，核心是浏览器自动化 + 截图 OCR + 调用统一 LLM 客户端。高层结构可从 `readme.md` 获取，下面是补充说明，方便之后改动：
 
 ### 1. 运行模式与入口脚本
 
@@ -67,15 +67,17 @@ python auto_answer_question.py
 #### 2.1 浏览器与登录态管理
 
 - `core/browser_session.py`
-  - 负责 Selenium WebDriver 初始化（浏览器类型、窗口大小、超时配置等）。
-  - 统一处理智慧树登录态 cookie 的「保存 / 恢复」，实际文件路径为：
-    - `data/zhihuishu_cookies.json`（已写入 .gitignore）。
+  - 负责 Playwright 浏览器、上下文和页面初始化（浏览器类型、超时配置等）。
+  - 统一处理智慧树登录态的「保存 / 恢复」，当前主状态文件为：
+    - `data/zhihuishu_storage_state.json`（已写入 .gitignore）。
+  - 同时兼容导入旧的 `data/zhihuishu_cookies.json`，避免历史登录态直接失效。
   - 启动流程通常是：
-    1. 创建 WebDriver
-    2. 尝试从本地 cookie 文件恢复登录态
-    3. 若恢复失败或 cookie 失效，则让用户在打开的浏览器里手动登录，登录成功后再把 cookie 写回本地
+    1. 创建 Playwright Browser / Context / Page
+    2. 优先从本地 `storage_state` 恢复登录态
+    3. 若不存在新的 `storage_state`，则尝试导入旧 cookie 文件
+    4. 若恢复失败或登录态失效，则让用户在打开的浏览器里手动登录，登录成功后再把 `storage_state` 写回本地
 
-对 Selenium 相关行为（比如切换窗口、等待元素、截图等）的通用封装，也应该放在这里，而不是入口脚本里到处散落。
+对 Playwright 相关行为（比如新标签页接管、等待元素、截图等）的通用封装，也应该放在这里，而不是入口脚本里到处散落。
 
 #### 2.2 题目流程与共享逻辑
 
@@ -86,7 +88,7 @@ python auto_answer_question.py
     - 使用 `cnocr` 识别文字，包括题干、选项、课程名称等；
     - 控制是否只“看题”（只 OCR 不问 LLM）、还是“答题”（OCR 后调用 LLM 返回答案）；
     - 处理多次调用 LLM 并找出重复答案的逻辑（对应 `llm_config.json` 中 `answer.repeat_until_duplicate`）；
-    - 根据识别出的答案，在 Selenium 页面上匹配并点击正确选项；
+    - 根据识别出的答案，在 Playwright 页面上匹配并点击正确选项；
     - 对 OCR/解析失败、LLM 返回空内容、max_tokens 不足等情况进行必要的重试或兜底。
 
 修改页面结构适配（例如智慧树改版导致题目在不同的 DOM 或截图区域），一般都在这里集中调整，而不是分别改三个入口脚本。

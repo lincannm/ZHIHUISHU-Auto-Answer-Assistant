@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-This repository is a small Python automation project built around Selenium, OCR, and an LLM API. The three entry points are `manual_mode.py` for manual mode, `onepage.py` for a single exam page, and `auto_answer_question.py` for walking a full test list. Shared logic lives in the `core/` package: `core/model.py` (LLM client and config), `core/browser_session.py` (Chrome startup and cookie persistence), `core/question_flow.py` (question answering flow), and `core/answer_context.py` (prompt assembly and course context).
+This repository is a small Python automation project built around Playwright, OCR, and an LLM API. The three entry points are `manual_mode.py` for manual mode, `onepage.py` for a single exam page, and `auto_answer_question.py` for walking a full test list. Shared logic lives in the `core/` package: `core/model.py` (LLM client and config), `core/browser_session.py` (browser startup and login-state persistence), `core/question_flow.py` (question answering flow), and `core/answer_context.py` (prompt assembly and course context).
 
 Keep generated assets under `data/`, including screenshots, demo media, cookies, and logs. Use `llm_config.example.json` as the template for local setup; `llm_config.json` is local-only and ignored by Git.
 
@@ -27,7 +27,7 @@ The first two commands are manual smoke tests. The `py_compile` check is the qui
 ## Coding Style & Naming Conventions
 Follow the existing Python style: 4-space indentation, `snake_case` for modules/functions/variables, `PascalCase` for classes, and `UPPER_CASE` for shared constants such as XPath selectors and default config values. Keep entry scripts thin; move reusable browser, OCR, and LLM logic into shared modules instead of duplicating it across scripts.
 
-Prefer `pathlib.Path` for filesystem paths and keep comments brief and targeted to non-obvious Selenium timing or cookie-handling behavior.
+Prefer `pathlib.Path` for filesystem paths and keep comments brief and targeted to non-obvious Playwright timing or login-state handling behavior.
 
 ## Testing Guidelines
 There is no dedicated automated test suite yet. Every change should include:

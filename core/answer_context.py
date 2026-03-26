@@ -1,6 +1,4 @@
-from selenium.common.exceptions import TimeoutException
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
+import time
 
 
 COURSE_NAME_XPATHS = (
@@ -43,25 +41,36 @@ def build_answer_prompt(question, course_name=""):
 你的答案："""
 
 
-def _find_course_name(driver):
+def _find_course_name(page):
     for xpath in COURSE_NAME_XPATHS:
-        elements = driver.find_elements(By.XPATH, xpath)
-        for element in elements:
-            if not element.is_displayed():
+        locator = page.locator(f"xpath={xpath}")
+        count = locator.count()
+        for index in range(count):
+            element = locator.nth(index)
+            if not element.is_visible():
                 continue
 
-            course_name = _normalize_text(element.text)
+            try:
+                course_name = _normalize_text(element.inner_text())
+            except Exception:
+                continue
+
             if course_name and course_name != "名称":
                 return course_name
 
-    fallback_value = driver.execute_script(COURSE_NAME_FALLBACK_SCRIPT)
+    try:
+        fallback_value = page.evaluate(COURSE_NAME_FALLBACK_SCRIPT)
+    except Exception:
+        fallback_value = ""
     return _normalize_text(fallback_value)
 
 
-def get_course_name(driver, timeout=10):
-    wait = WebDriverWait(driver, timeout)
+def get_course_name(page, timeout=10):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        course_name = _find_course_name(page)
+        if course_name:
+            return course_name
+        time.sleep(0.2)
 
-    try:
-        return wait.until(lambda current_driver: _find_course_name(current_driver) or None)
-    except TimeoutException:
-        return _find_course_name(driver)
+    return _find_course_name(page)
