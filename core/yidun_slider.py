@@ -11,13 +11,13 @@ import requests
 YIDUN_BG_SELECTOR = ".yidun_bg-img"
 YIDUN_BLOCK_SELECTOR = ".yidun_jigsaw, .yidun_jigsaw-img"
 YIDUN_SLIDER_SELECTOR = ".yidun_slider"
-YIDUN_REFRESH_SELECTOR = ".yidun_refresh"
 YIDUN_TIPS_SELECTOR = ".yidun_tips__text"
 YIDUN_POPUP_SELECTOR = ".yidun_popup, .yidun_modal"
 DEFAULT_IMAGE_REQUEST_TIMEOUT_SECONDS = 10
 DEFAULT_YIDUN_WAIT_TIMEOUT_MS = 10_000
 DEFAULT_YIDUN_CHALLENGE_ATTEMPTS = 4
-DEFAULT_YIDUN_DISTANCES_PER_CHALLENGE = 6
+DEFAULT_YIDUN_DISTANCES_PER_CHALLENGE = 3
+DEFAULT_YIDUN_DRAG_OFFSET = 32
 SUCCESS_HINTS = ("成功", "通过", "校验完成")
 LOADING_HINTS = ("加载中", "验证中", "提交中")
 
@@ -27,9 +27,6 @@ class PieceGeometry:
     piece_bgr: np.ndarray
     mask: np.ndarray
     bbox_x: int
-    bbox_y: int
-    width: int
-    height: int
 
 
 @dataclass
@@ -38,8 +35,15 @@ class YidunElements:
     bg_img: object
     block_img: object
     slider: object
-    refresh: object
     tips: object
+
+
+@dataclass
+class DistanceEstimate:
+    name: str
+    block_left: float
+    mapped_distance: float
+    confidence: float = 0.0
 
 
 def _default_logger(_message):
@@ -97,9 +101,6 @@ def _extract_piece_geometry(block_image):
         piece_bgr=piece,
         mask=mask,
         bbox_x=x,
-        bbox_y=y,
-        width=width,
-        height=height,
     )
 
 
@@ -122,34 +123,34 @@ def _estimate_template_match_x(bg_image, geometry):
     return int(max_loc[0])
 
 
-def _estimate_difference_x(bg_image, geometry):
-    mask = geometry.mask > 0
-    piece = geometry.piece_bgr.astype(np.int16)
-    bg = bg_image[:, :, :3].astype(np.int16)
-    best_x = 0
-    best_score = float("-inf")
-    max_x = bg.shape[1] - geometry.width
-    for x in range(0, max_x + 1):
-        patch = bg[geometry.bbox_y:geometry.bbox_y + geometry.height, x:x + geometry.width]
-        if patch.shape[:2] != mask.shape:
-            continue
-
-        score = np.abs(patch - piece).mean(axis=2)[mask].mean()
-        if score > best_score:
-            best_score = float(score)
-            best_x = x
-    return int(best_x)
+def _to_bgr_image(image):
+    if image.ndim == 2:
+        return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    if image.shape[2] >= 4:
+        return cv2.cvtColor(image[:, :, :4], cv2.COLOR_BGRA2BGR)
+    return image[:, :, :3]
 
 
-def _estimate_hole_anomaly_x(bg_image, geometry):
-    hsv = cv2.cvtColor(bg_image[:, :, :3], cv2.COLOR_BGR2HSV)
-    value_channel = hsv[:, :, 2].astype(np.float32)
-    saturation_channel = hsv[:, :, 1].astype(np.float32)
-    anomaly = value_channel - saturation_channel * 0.75
-    anomaly = cv2.normalize(anomaly, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    response = cv2.matchTemplate(anomaly, geometry.mask, cv2.TM_CCOEFF_NORMED)
-    _, _, _, max_loc = cv2.minMaxLoc(response)
-    return int(max_loc[0])
+def _process_background_image_for_match(image):
+    gray = cv2.cvtColor(_to_bgr_image(image), cv2.COLOR_BGR2GRAY)
+    denoised = cv2.fastNlMeansDenoising(gray, None, 10, 7, 21)
+    _, binary = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return cv2.Canny(binary, 500, 900, apertureSize=3)
+
+
+def _process_block_image_for_match(image):
+    gray = cv2.cvtColor(_to_bgr_image(image), cv2.COLOR_BGR2GRAY)
+    inverted = cv2.bitwise_not(gray)
+    _, binary = cv2.threshold(inverted, 240, 255, cv2.THRESH_BINARY_INV)
+    return cv2.Canny(binary, 500, 900, apertureSize=3)
+
+
+def _estimate_processed_edge_block_left(bg_image, block_image):
+    bg_edges = _process_background_image_for_match(bg_image)
+    block_edges = _process_block_image_for_match(block_image)
+    response = cv2.matchTemplate(bg_edges, block_edges, cv2.TM_CCOEFF_NORMED)
+    _, max_val, _, max_loc = cv2.minMaxLoc(response)
+    return float(max_loc[0]), float(max_val)
 
 
 def _estimate_edge_x(bg_image, geometry):
@@ -161,60 +162,79 @@ def _estimate_edge_x(bg_image, geometry):
     return int(max_loc[0])
 
 
-def _clamp_distance(distance, track_width):
-    return max(0, min(int(round(distance)), max(int(track_width), 0)))
+def _clamp_distance(distance, max_distance):
+    return max(0, min(int(round(distance)), max(int(max_distance), 0)))
 
 
-def _build_distance_candidates(bg_image, geometry, track_width):
-    raw_xs = (
-        _estimate_hole_anomaly_x(bg_image, geometry),
-        _estimate_difference_x(bg_image, geometry),
-        _estimate_edge_x(bg_image, geometry),
-        _estimate_template_match_x(bg_image, geometry),
+def _normalize_block_left(block_left, bg_image, block_image, track_width):
+    image_range = max(float(bg_image.shape[1] - block_image.shape[1]), 1.0)
+    max_distance = min(float(track_width), image_range)
+    return max(0.0, min(float(block_left), max_distance))
+
+
+def _build_distance_candidates(bg_image, block_image, geometry, track_width, logger=None):
+    logger = logger or _default_logger
+    processed_left, processed_score = _estimate_processed_edge_block_left(bg_image, block_image)
+    template_left = float(_estimate_template_match_x(bg_image, geometry) - geometry.bbox_x)
+    edge_left = float(_estimate_edge_x(bg_image, geometry) - geometry.bbox_x)
+    estimates = (
+        DistanceEstimate(
+            name="processed_edge",
+            block_left=processed_left,
+            mapped_distance=_normalize_block_left(processed_left, bg_image, block_image, track_width),
+            confidence=processed_score,
+        ),
+        DistanceEstimate(
+            name="template",
+            block_left=template_left,
+            mapped_distance=_normalize_block_left(template_left, bg_image, block_image, track_width),
+        ),
+        DistanceEstimate(
+            name="edge",
+            block_left=edge_left,
+            mapped_distance=_normalize_block_left(edge_left, bg_image, block_image, track_width),
+        ),
     )
+
+    estimate_logs = ", ".join(
+        f"{item.name}: block_left={item.block_left:.1f}, mapped={item.mapped_distance:.1f}, score={item.confidence:.3f}"
+        for item in estimates
+    )
+    logger(f"易盾距离估计：{estimate_logs}")
 
     candidates = []
     seen = set()
-    for raw_x in raw_xs:
-        for distance in (
-            raw_x - geometry.bbox_x - geometry.width,
-            raw_x - geometry.bbox_x - geometry.width / 2,
-            raw_x - geometry.bbox_x,
-        ):
-            for bias in (-4, 0, 4):
-                clamped = _clamp_distance(distance + bias, track_width)
-                if clamped in seen:
-                    continue
-                seen.add(clamped)
-                candidates.append(clamped)
-    return candidates[:DEFAULT_YIDUN_DISTANCES_PER_CHALLENGE]
+    reliable_estimates = [item for item in estimates if abs(item.mapped_distance - estimates[0].mapped_distance) <= 6]
+    anchor = (
+        sum(item.mapped_distance for item in reliable_estimates) / len(reliable_estimates)
+        if reliable_estimates
+        else estimates[0].mapped_distance
+    )
+    for value in (anchor, anchor - 2, anchor + 2):
+        clamped = _clamp_distance(value, track_width)
+        if clamped in seen:
+            continue
+        seen.add(clamped)
+        candidates.append(clamped)
+        if len(candidates) >= DEFAULT_YIDUN_DISTANCES_PER_CHALLENGE:
+            return candidates
+    return candidates
 
 
 def _build_drag_track(distance):
-    if distance <= 0:
+    remaining = max(float(distance), 0.0)
+    if remaining <= 0:
         return [0.0]
 
     track = []
-    current = 0.0
-    midpoint = distance * random.uniform(0.55, 0.75)
-    velocity = random.uniform(0.0, 1.2)
-    tick = 0.016
-    while current < distance:
-        acceleration = random.uniform(2.4, 3.6) if current < midpoint else -random.uniform(3.1, 4.6)
-        previous_velocity = velocity
-        velocity = max(previous_velocity + acceleration * tick, 0.8)
-        move = previous_velocity * tick + 0.5 * acceleration * tick * tick
-        move = max(move * 12, random.uniform(1.4, 4.2))
-        if current + move > distance:
-            move = distance - current
-        current += move
-        track.append(move)
-
-    overshoot = min(random.uniform(1.0, 3.0), max(distance * 0.08, 0.0))
-    if overshoot > 0.2:
-        track.extend((overshoot, -overshoot * random.uniform(0.6, 0.9)))
-    track.append(random.uniform(0.1, 0.5))
-    return [step for step in track if abs(step) > 0.01]
+    for _ in range(29):
+        if remaining <= 1.5:
+            break
+        step = random.uniform(1.0, remaining / 2.0)
+        track.append(step)
+        remaining -= step
+    track.append(remaining)
+    return [step for step in track if step > 0.01]
 
 
 def _get_tips_text(elements):
@@ -234,23 +254,24 @@ def _is_popup_visible(elements):
         return False
 
 
-def _drag_slider(page, slider, distance):
+def _drag_slider(page, slider, distance, drag_offset=DEFAULT_YIDUN_DRAG_OFFSET):
+    slider.hover()
     slider_box = slider.bounding_box()
     if not slider_box:
         raise RuntimeError("未获取到易盾滑块位置。")
 
-    start_x = slider_box["x"] + slider_box["width"] / 2
-    start_y = slider_box["y"] + slider_box["height"] / 2
-
-    page.mouse.move(start_x - random.uniform(5, 10), start_y + random.uniform(-1.0, 1.0))
-    page.mouse.move(start_x, start_y, steps=2)
+    target_y = slider_box["y"] + slider_box["height"] / 2
     page.mouse.down()
-    time.sleep(random.uniform(0.18, 0.32))
+    time.sleep(random.uniform(0.05, 0.12))
 
-    current_x = start_x
+    traveled = 0.0
     for step in _build_drag_track(distance):
-        current_x += step
-        page.mouse.move(current_x, start_y + random.uniform(-1.2, 1.2), steps=1)
+        traveled += step
+        page.mouse.move(
+            slider_box["x"] + float(drag_offset) + traveled,
+            target_y + random.uniform(-0.8, 0.8),
+            steps=1,
+        )
         time.sleep(random.uniform(0.008, 0.02))
 
     time.sleep(random.uniform(0.05, 0.12))
@@ -279,15 +300,9 @@ def _wait_after_drag(elements):
     return not _is_popup_visible(elements)
 
 
-def _refresh_challenge(elements, logger):
-    try:
-        if elements.refresh.count() == 0:
-            return
-        elements.refresh.first.click()
-        logger("易盾滑块未通过，已刷新验证码重试。")
-        time.sleep(random.uniform(0.8, 1.2))
-    except Exception as exc:
-        logger(f"刷新易盾验证码失败：{exc}")
+def _wait_for_next_challenge(logger):
+    logger("易盾滑块未通过，等待验证码重置后重试。")
+    time.sleep(random.uniform(0.9, 1.4))
 
 
 def _locate_yidun_elements(page):
@@ -308,7 +323,6 @@ def _locate_yidun_elements(page):
                 bg_img=bg_img,
                 block_img=root.locator(YIDUN_BLOCK_SELECTOR).first,
                 slider=slider,
-                refresh=root.locator(YIDUN_REFRESH_SELECTOR),
                 tips=root.locator(YIDUN_TIPS_SELECTOR),
             )
         except Exception:
@@ -318,12 +332,13 @@ def _locate_yidun_elements(page):
 
 def solve_yidun_slider(page, logger=None, max_attempts=DEFAULT_YIDUN_CHALLENGE_ATTEMPTS):
     logger = logger or _default_logger
-    elements = _locate_yidun_elements(page)
-    if elements is None:
-        return False
 
     for attempt in range(1, max_attempts + 1):
         try:
+            elements = _locate_yidun_elements(page)
+            if elements is None:
+                return False
+
             elements.bg_img.wait_for(state="visible", timeout=DEFAULT_YIDUN_WAIT_TIMEOUT_MS)
             elements.block_img.wait_for(state="visible", timeout=DEFAULT_YIDUN_WAIT_TIMEOUT_MS)
             elements.slider.wait_for(state="visible", timeout=DEFAULT_YIDUN_WAIT_TIMEOUT_MS)
@@ -339,20 +354,29 @@ def solve_yidun_slider(page, logger=None, max_attempts=DEFAULT_YIDUN_CHALLENGE_A
                 return False
 
             track_width = max(control_box["width"] - slider_box["width"], 0)
-            distance_candidates = _build_distance_candidates(bg_image, geometry, track_width)
+            logger(
+                "易盾拖拽参数："
+                f"track_width={track_width:.1f}, "
+                f"image_range={max(bg_image.shape[1] - block_image.shape[1], 0)}, "
+                f"drag_offset={DEFAULT_YIDUN_DRAG_OFFSET}"
+            )
+            distance_candidates = _build_distance_candidates(bg_image, block_image, geometry, track_width, logger=logger)
             logger(f"第 {attempt} 轮易盾识别完成，候选拖动距离：{distance_candidates}")
-            for distance in distance_candidates:
-                _drag_slider(page, elements.slider, distance)
-                if _wait_after_drag(elements):
-                    logger(f"易盾滑块自动拖动成功，距离 {distance}px。")
-                    return True
-                logger(f"易盾滑块距离 {distance}px 未通过。")
+            if not distance_candidates:
+                return False
+
+            distance = distance_candidates[0]
+            _drag_slider(page, elements.slider, distance)
+            if _wait_after_drag(elements):
+                logger(f"易盾滑块自动拖动成功，距离 {distance}px。")
+                return True
+            logger(f"易盾滑块距离 {distance}px 未通过。")
 
             if attempt < max_attempts:
-                _refresh_challenge(elements, logger)
+                _wait_for_next_challenge(logger)
         except Exception as exc:
             logger(f"自动处理易盾滑块失败：{exc}")
             if attempt < max_attempts:
-                _refresh_challenge(elements, logger)
+                _wait_for_next_challenge(logger)
 
     return False
