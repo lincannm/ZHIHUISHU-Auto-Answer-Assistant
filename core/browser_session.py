@@ -11,6 +11,7 @@ from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_
 
 from .console import log_message
 from .model import load_config
+from .yidun_slider import solve_yidun_slider
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -263,6 +264,23 @@ def _wait_for_login_feedback(page, timeout_seconds=DEFAULT_AUTO_LOGIN_FEEDBACK_W
     return "pending"
 
 
+def _try_auto_solve_login_challenge(page):
+    if not _is_login_challenge_visible(page):
+        return "skipped"
+
+    log_message("检测到易盾滑块，开始自动拖动验证。")
+    if not solve_yidun_slider(page, logger=log_message):
+        log_message("自动拖动易盾滑块未通过，将回退为手动验证。")
+        return "challenge_visible"
+
+    log_message("已自动完成易盾滑块，等待登录结果。")
+    if _wait_for_login_result(page):
+        return "completed"
+    if _is_login_challenge_visible(page):
+        return "challenge_visible"
+    return "captcha_solved"
+
+
 def _populate_login_input(locator, value):
     locator.wait_for(state="visible")
     locator.click()
@@ -343,7 +361,7 @@ def _try_auto_login(page):
         submit_feedback = _submit_phone_login(page)
         if submit_feedback == "challenge_visible":
             log_message("已根据配置自动点击登录，并触发验证码弹层。")
-            return "challenge_visible"
+            return _try_auto_solve_login_challenge(page)
         if submit_feedback == "completed":
             log_message("已根据配置自动点击登录。")
             return "completed"
@@ -567,7 +585,9 @@ def get_authenticated_session(target_url):
     if auto_login_status == "filled":
         prompt_text = "已自动填充手机号和密码，请确认后登录；如页面要求滑块或验证码，也请在浏览器完成后按回车继续..."
     elif auto_login_status == "challenge_visible":
-        prompt_text = "已自动点击登录并弹出验证码，请在浏览器完成验证后按回车继续..."
+        prompt_text = "已自动尝试拖动易盾滑块，但当前仍需要验证码，请在浏览器完成验证后按回车继续..."
+    elif auto_login_status == "captcha_solved":
+        prompt_text = "已自动完成易盾滑块，但页面尚未跳转，请确认登录结果后按回车继续..."
     elif auto_login_status == "submitted":
         prompt_text = "已自动提交登录请求；如页面仍要求滑块或验证码，请完成后按回车继续..."
     elif auto_login_status == "submit_not_observed":

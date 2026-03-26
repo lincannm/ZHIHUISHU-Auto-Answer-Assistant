@@ -1,3 +1,5 @@
 requests
 playwright
 cnocr
+numpy
+opencv-python-headless
