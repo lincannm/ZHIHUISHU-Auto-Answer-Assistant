@@ -1,9 +1,13 @@
+import base64
+import json
 import logging
 import random
+import traceback
 import time
 from pathlib import Path
 
 from cnocr import CnOcr
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 
@@ -24,6 +28,7 @@ SUBMIT_BUTTON_XPATH = '//button[contains(@class, "btnStyleXSumit")]'
 SUBMIT_CONFIRM_DIALOG_XPATH = '//div[contains(@class, "el-message-box__wrapper")]'
 ROOT_DIR = Path(__file__).resolve().parent.parent
 QUESTION_SCREENSHOT_PATH = ROOT_DIR / "data" / "question.png"
+SAVE_ANSWER_ENDPOINT = "/answer/saveStudentAnswer"
 
 
 def error_handler(func):
@@ -32,7 +37,11 @@ def error_handler(func):
             try:
                 return func(*args, **kwargs)
             except Exception as exc:
-                log_message(f"函数 {func.__name__} 发生错误: {exc}")
+                error_text = str(exc).strip() or "无详细错误信息"
+                log_message(f"函数 {func.__name__} 发生错误: {exc.__class__.__name__}: {error_text}")
+                traceback_text = traceback.format_exc().strip()
+                if traceback_text:
+                    log_message(traceback_text)
                 input("请修复错误并按回车键继续...")
 
     return wrapper
@@ -45,6 +54,12 @@ def text_ocr(image=QUESTION_SCREENSHOT_PATH):
         [item["text"] for item in ocr_results if item["text"].strip()]
     )
     return extracted_text
+
+
+def _normalize_question_text(text):
+    lines = [line.strip() for line in str(text or "").splitlines()]
+    lines = [line for line in lines if line]
+    return "\n".join(lines).strip()
 
 
 def get_answer_with_attempts(question, course_name=""):
@@ -73,11 +88,35 @@ def get_answer(question, course_name=""):
     return final_answer
 
 
-def capture_question_text(question_element, image_path=QUESTION_SCREENSHOT_PATH):
+def extract_question_text_from_dom(driver, question_element):
+    try:
+        dom_text = driver.execute_script(
+            "return arguments[0].innerText || arguments[0].textContent || '';",
+            question_element,
+        )
+    except Exception:
+        dom_text = ""
+
+    dom_text = _normalize_question_text(dom_text)
+    if dom_text:
+        return dom_text
+
+    try:
+        return _normalize_question_text(question_element.text)
+    except Exception:
+        return ""
+
+
+def capture_question_text(question_element, image_path=QUESTION_SCREENSHOT_PATH, driver=None):
+    if driver is not None:
+        dom_text = extract_question_text_from_dom(driver, question_element)
+        if dom_text:
+            return dom_text
+
     image_path = Path(image_path)
     image_path.parent.mkdir(parents=True, exist_ok=True)
     question_element.screenshot(str(image_path))
-    return text_ocr(image_path)
+    return _normalize_question_text(text_ocr(image_path))
 
 
 def solve_question_element(question_element, course_name="", image_path=QUESTION_SCREENSHOT_PATH):
@@ -131,6 +170,99 @@ def _has_question_layout_box(driver, question_element):
     )
 
 
+def _find_current_question(current_driver):
+    best_match = None
+    best_distance = None
+    question_elements = current_driver.find_elements(By.XPATH, QUESTION_XPATH)
+    for question_index, question_element in enumerate(question_elements, start=1):
+        if not question_element.is_displayed():
+            continue
+        if not _has_question_layout_box(current_driver, question_element):
+            continue
+        distance = _get_question_center_distance(current_driver, question_element)
+        if distance is None:
+            continue
+        if best_distance is None or distance < best_distance:
+            best_match = (question_element, question_index)
+            best_distance = distance
+    return best_match
+
+
+def _drain_performance_logs(driver):
+    try:
+        return driver.get_log("performance")
+    except Exception:
+        return []
+
+
+def _parse_performance_message(entry):
+    try:
+        payload = json.loads(entry.get("message", ""))
+    except (TypeError, ValueError):
+        return None
+    message = payload.get("message")
+    if isinstance(message, dict):
+        return message
+    return None
+
+
+def _decode_response_body(body_payload):
+    body = body_payload.get("body", "")
+    if not body_payload.get("base64Encoded"):
+        return body
+
+    try:
+        return base64.b64decode(body).decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _get_save_answer_result_from_logs(driver):
+    request_ids = []
+    for entry in _drain_performance_logs(driver):
+        message = _parse_performance_message(entry)
+        if not message:
+            continue
+
+        if message.get("method") != "Network.responseReceived":
+            continue
+
+        params = message.get("params", {})
+        response = params.get("response", {})
+        if SAVE_ANSWER_ENDPOINT not in str(response.get("url", "")):
+            continue
+
+        request_id = params.get("requestId")
+        if request_id:
+            request_ids.append(request_id)
+
+    for request_id in reversed(request_ids):
+        try:
+            body_payload = driver.execute_cdp_cmd(
+                "Network.getResponseBody",
+                {"requestId": request_id},
+            )
+        except Exception:
+            continue
+
+        response_text = _decode_response_body(body_payload)
+        if not response_text:
+            continue
+
+        try:
+            response_data = json.loads(response_text)
+        except ValueError:
+            continue
+
+        if isinstance(response_data, dict):
+            return response_data
+    return None
+
+
+def clear_driver_network_logs(driver):
+    _drain_performance_logs(driver)
+
+
 def get_question_element(driver, index, timeout=20, scroll=True):
     wait = WebDriverWait(driver, timeout)
 
@@ -145,6 +277,21 @@ def get_question_element(driver, index, timeout=20, scroll=True):
         return None
 
     question_element = wait.until(find_target_question)
+    if scroll:
+        _scroll_question_into_view(driver, question_element)
+    return question_element
+
+
+def _try_get_question_element_by_index(driver, index, scroll=True):
+    question_elements = driver.find_elements(By.XPATH, QUESTION_XPATH)
+    if len(question_elements) <= index:
+        return None
+
+    question_element = question_elements[index]
+    if not question_element.is_displayed():
+        return None
+    if not _has_question_layout_box(driver, question_element):
+        return None
     if scroll:
         _scroll_question_into_view(driver, question_element)
     return question_element
@@ -182,25 +329,42 @@ def get_viewport_question_element(driver, visible_index, timeout=20):
 
 def get_current_question_element(driver, timeout=20):
     wait = WebDriverWait(driver, timeout)
+    return wait.until(_find_current_question)
 
-    def find_target_question(current_driver):
-        best_match = None
-        best_distance = None
-        question_elements = current_driver.find_elements(By.XPATH, QUESTION_XPATH)
-        for question_index, question_element in enumerate(question_elements, start=1):
-            if not question_element.is_displayed():
-                continue
-            if not _has_question_layout_box(current_driver, question_element):
-                continue
-            distance = _get_question_center_distance(current_driver, question_element)
-            if distance is None:
-                continue
-            if best_distance is None or distance < best_distance:
-                best_match = (question_element, question_index)
-                best_distance = distance
-        return best_match
 
-    return wait.until(find_target_question)
+def resolve_auto_question_element(driver, index, timeout=20):
+    indexed_question = _try_get_question_element_by_index(driver, index)
+    if indexed_question is not None:
+        return indexed_question, index + 1
+
+    log_message(
+        f"未在页面中直接定位到第{index + 1}题，已改为识别当前显示的题目继续答题。"
+    )
+    current_question, current_number = get_current_question_element(driver, timeout=timeout)
+    return current_question, current_number or (index + 1)
+
+
+def wait_for_question_change(driver, previous_question_number, timeout=20):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        current_question = _find_current_question(driver)
+        if current_question:
+            question_element, current_number = current_question
+            if current_number != previous_question_number:
+                return question_element, current_number
+
+        save_answer_result = _get_save_answer_result_from_logs(driver)
+        if save_answer_result:
+            status = str(save_answer_result.get("status", "")).strip()
+            if status and status != "200":
+                message = save_answer_result.get("msg") or str(save_answer_result)
+                raise RuntimeError(f"保存答案失败：{message}")
+
+        time.sleep(0.2)
+
+    raise TimeoutException(
+        f"点击下一题后等待题号变化超时，当前仍停留在第{previous_question_number}题。"
+    )
 
 
 def get_next_button(driver, timeout=20):
@@ -279,13 +443,19 @@ def apply_answer(question_element, answer):
 
 @error_handler
 def answer(driver, index, course_name=""):
-    question_element = get_question_element(driver, index)
-    question_text = capture_question_text(question_element)
-    log_message(f"第{index + 1}题：{question_text}")
+    question_element, question_number = get_current_question_element(driver)
+    expected_question_number = index + 1
+    if question_number != expected_question_number:
+        log_message(
+            f"当前显示的是第{question_number}题，预期处理第{expected_question_number}题；已按当前题目继续答题。"
+        )
+    question_text = capture_question_text(question_element, driver=driver)
+    log_message(f"第{question_number}题：{question_text}")
     final_answer, answer_attempts = get_answer_with_attempts(question_text, course_name)
     log_answer_attempts(answer_attempts)
     log_message(f"最终答案：{final_answer}")
     apply_answer(question_element, final_answer)
+    return question_number
 
 
 def auto_answer(driver):
@@ -297,7 +467,7 @@ def auto_answer(driver):
 
     index = 0
     while True:
-        answer(driver, index, course_name)
+        answered_question_number = answer(driver, index, course_name)
         next_button = get_next_button(driver)
         if next_button.text.strip() == "保存":
             submit_button = get_submit_button(driver)
@@ -307,6 +477,8 @@ def auto_answer(driver):
             confirm_button.click()
             log_message("提交成功")
             return
+        clear_driver_network_logs(driver)
         next_button.click()
         time.sleep(random.uniform(0.5, 1))
-        index += 1
+        wait_for_question_change(driver, answered_question_number)
+        index = answered_question_number

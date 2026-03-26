@@ -30,6 +30,12 @@
 pip install -r requirements.txt
 ```
 
+浏览器驱动说明：
+
+- 默认优先使用本机已安装的 Chrome，并尝试通过 Selenium Manager 自动准备驱动
+- 如果你的网络环境无法自动拉取驱动，可以把匹配当前 Chrome 版本的 `chromedriver.exe` 放到仓库根目录、`drivers/` 或 `data/` 目录
+- 也可以通过环境变量 `ZHIHUISHU_CHROMEDRIVER` 指定驱动路径，通过 `ZHIHUISHU_CHROME_BINARY` 指定 `chrome.exe` 路径
+
 ## 配置
 
 先编辑 `llm_config.json`。
@@ -174,6 +180,11 @@ python main.py
 
 默认会把 LLM 请求、响应、重试和错误同时输出到控制台与 `data/logs/llm.log`。日志中会保留完整 prompt / response（超长内容按 `logging.max_body_chars` 截断），并对 `api_key` / `Authorization` 做脱敏处理。
 
+运行时控制台还会额外显示两类状态提示：
+
+- 触发独立联网搜索，或流式工具调用中检测到 `web_search` 时，会显示 `正在联网搜索...`
+- 调用大模型时，会先显示 `正在思考中...`；如果模型返回 `reasoning_content` 并且服务支持流式输出，会实时打印 `思维链：` 内容
+
 ## 文件说明
 
 - `main.py`: 统一入口，启动后交互式选择模式并输入 URL
@@ -195,6 +206,7 @@ python main.py
 - 页面题目区域仍然依赖 OCR，识别错误会直接影响答题结果
 - 智慧树页面部分元素处于 `shadow-root (closed)` 中，因此当前方案仍然依赖截图识别
 - 联网搜索会提升信息覆盖面，但也可能让模型更容易输出解释性文本，建议按实际效果调整 `prompt_template`
+- 如果模型服务不支持 `stream` 或智谱的 `tool_stream`，代码会自动回退到兼容模式；这种情况下仍能答题，但思维链或联网搜索状态不一定能实时显示
 - 推理模型若返回空 `content` 且 `finish_reason = length`，当前代码会自动放大 `max_tokens` 重试一次，并在必要时尝试从推理结果中提取最终答案
 - `llm_config.json` 已加入 `.gitignore`，避免误提交真实密钥
 - `data/zhihuishu_cookies.json` 保存的是本地登录态，已加入 `.gitignore`，不要外传

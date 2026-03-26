@@ -1,11 +1,16 @@
 import json
+import os
 import random
+import shutil
+import threading
 import time
 from collections import defaultdict
 from pathlib import Path
+from queue import Queue
 from urllib.parse import urlparse
 
 from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
 
 from .console import log_message
 
@@ -13,6 +18,7 @@ from .console import log_message
 ROOT_DIR = Path(__file__).resolve().parent.parent
 COOKIE_STORE_PATH = ROOT_DIR / "data" / "zhihuishu_cookies.json"
 COOKIE_FIELDS = {"name", "value", "path", "domain", "secure", "httpOnly", "expiry", "sameSite"}
+DEFAULT_DRIVER_START_TIMEOUT = 25
 
 
 def _sleep(min_seconds=0.5, max_seconds=2):
@@ -92,13 +98,129 @@ def _looks_like_login_page(current_url):
     return "passport.zhihuishu.com" in host or "login" in path
 
 
+def _first_existing_path(candidates):
+    for candidate in candidates:
+        if not candidate:
+            continue
+
+        path = Path(candidate).expanduser()
+        if path.exists():
+            return path
+    return None
+
+
+def _resolve_chrome_binary_path():
+    env_candidates = [
+        os.getenv("ZHIHUISHU_CHROME_BINARY"),
+        os.getenv("CHROME_BINARY"),
+        os.getenv("GOOGLE_CHROME_BIN"),
+    ]
+    common_candidates = [
+        Path("C:/Program Files/Google/Chrome/Application/chrome.exe"),
+        Path("C:/Program Files (x86)/Google/Chrome/Application/chrome.exe"),
+        Path.home() / "AppData/Local/Google/Chrome/Application/chrome.exe",
+    ]
+    return _first_existing_path([*env_candidates, *common_candidates])
+
+
+def _resolve_chromedriver_path():
+    env_candidates = [
+        os.getenv("ZHIHUISHU_CHROMEDRIVER"),
+        os.getenv("CHROMEDRIVER"),
+    ]
+    common_candidates = [
+        ROOT_DIR / "chromedriver.exe",
+        ROOT_DIR / "drivers" / "chromedriver.exe",
+        ROOT_DIR / "data" / "chromedriver.exe",
+    ]
+    resolved = _first_existing_path([*env_candidates, *common_candidates])
+    if resolved:
+        return resolved
+
+    in_path = shutil.which("chromedriver")
+    if in_path:
+        return Path(in_path)
+    return None
+
+
+def _build_driver_timeout_message(chromedriver_path, chrome_binary_path, timeout_seconds):
+    location_lines = [
+        f"chromedriver: {chromedriver_path or '未找到'}",
+        f"chrome.exe: {chrome_binary_path or '未找到'}",
+    ]
+    locations = "；".join(location_lines)
+    return (
+        f"浏览器启动超过 {timeout_seconds} 秒，已中止等待。"
+        f"当前检测结果：{locations}。"
+        "如果本机无法通过 Selenium Manager 自动下载驱动，"
+        "请下载与 Chrome 版本匹配的 chromedriver.exe，放到仓库根目录、drivers/ 或 data/ 目录，"
+        "或者设置环境变量 ZHIHUISHU_CHROMEDRIVER 后重试。"
+    )
+
+
+def _create_driver_with_timeout(factory, timeout_seconds, timeout_message):
+    result_queue = Queue(maxsize=1)
+
+    def target():
+        try:
+            result_queue.put(("driver", factory()))
+        except Exception as exc:
+            result_queue.put(("error", exc))
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(timeout_seconds)
+    if thread.is_alive():
+        raise RuntimeError(timeout_message)
+    if result_queue.empty():
+        raise RuntimeError("浏览器启动失败：驱动进程已退出，但未返回可用结果。")
+
+    result_type, value = result_queue.get()
+    if result_type == "error":
+        raise RuntimeError(f"浏览器启动失败: {value}") from value
+    return value
+
+
 def create_driver():
     options = webdriver.ChromeOptions()
+    options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
     # selenium尝试连接https网站时会报SSL handshake failed, 加上以下两行代码可以忽略证书错误
     options.add_argument("--ignore-certificate-errors")
     # 设置日志级别为3, 仅记录警告和错误
     options.add_argument("--log-level=3")
-    return webdriver.Chrome(options=options)
+    chrome_binary_path = _resolve_chrome_binary_path()
+    if chrome_binary_path:
+        options.binary_location = str(chrome_binary_path)
+
+    chromedriver_path = _resolve_chromedriver_path()
+    if chromedriver_path:
+        log_message(f"正在启动浏览器，使用本地驱动：{chromedriver_path}")
+    else:
+        log_message(
+            "正在启动浏览器，未检测到本地 chromedriver，将尝试使用 Selenium Manager 自动获取驱动..."
+        )
+
+    service = Service(executable_path=str(chromedriver_path)) if chromedriver_path else None
+
+    def factory():
+        if service:
+            return webdriver.Chrome(service=service, options=options)
+        return webdriver.Chrome(options=options)
+
+    driver = _create_driver_with_timeout(
+        factory,
+        DEFAULT_DRIVER_START_TIMEOUT,
+        _build_driver_timeout_message(
+            chromedriver_path,
+            chrome_binary_path,
+            DEFAULT_DRIVER_START_TIMEOUT,
+        ),
+    )
+    try:
+        driver.execute_cdp_cmd("Network.enable", {})
+    except Exception:
+        pass
+    return driver
 
 
 def save_login_state(driver):

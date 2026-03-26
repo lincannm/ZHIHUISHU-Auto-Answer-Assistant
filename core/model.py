@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import requests
 
-from .console import format_timestamp, log_message
+from .console import create_live_stream, format_timestamp, log_message
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -22,6 +22,7 @@ DEFAULT_RETRY_MAX_TOKENS = 8192
 DEFAULT_LOG_MAX_BYTES = 5 * 1024 * 1024
 DEFAULT_LOG_BACKUP_COUNT = 3
 DEFAULT_LOG_MAX_BODY_CHARS = 20000
+DEFAULT_REASONING_STREAM_TITLE = "思维链："
 MASKED_VALUE = "***REDACTED***"
 DEFAULT_SYSTEM_PROMPT = (
     "你是一个答题助手。"
@@ -153,6 +154,10 @@ class LLMClient:
         self.session = requests.Session()
         self.prompt_cache = {}
         self.web_search_warning_shown = False
+        self.stream_warning_shown = False
+        self.tool_stream_warning_shown = False
+        self.stream_supported = True
+        self.tool_stream_supported = True
         self.log_max_body_chars = _safe_int(
             self.log_config.get("max_body_chars"),
             DEFAULT_LOG_MAX_BODY_CHARS,
@@ -172,12 +177,12 @@ class LLMClient:
     def _supports_zhipu_web_search_in_chat(self):
         return self._is_zhipu_llm() and self.model.lower().startswith("glm")
 
-    def _warn_once(self, message):
-        if self.web_search_warning_shown:
+    def _warn_once(self, message, flag_name="web_search_warning_shown", event_type="warning"):
+        if getattr(self, flag_name, False):
             return
         log_message(message)
-        self._log_event("warning", level=logging.WARNING, message=message)
-        self.web_search_warning_shown = True
+        self._log_event(event_type, level=logging.WARNING, message=message)
+        setattr(self, flag_name, True)
 
     def _log_event(self, event_type, level=logging.INFO, **payload):
         if not self.logger:
@@ -207,17 +212,39 @@ class LLMClient:
             payload=payload,
         )
 
-    def _log_response(self, event_type, request_id, attempt, url, response, elapsed_ms):
+    def _log_response_payload(
+        self,
+        event_type,
+        request_id,
+        attempt,
+        url,
+        status_code,
+        ok,
+        elapsed_ms,
+        body,
+    ):
         self._log_event(
             event_type,
             request_id=request_id,
             attempt=attempt,
             method="POST",
             url=url,
-            status_code=response.status_code,
-            ok=response.ok,
+            status_code=status_code,
+            ok=ok,
             elapsed_ms=round(elapsed_ms, 2),
-            body=self._get_response_body(response),
+            body=body,
+        )
+
+    def _log_response(self, event_type, request_id, attempt, url, response, elapsed_ms):
+        self._log_response_payload(
+            event_type,
+            request_id,
+            attempt,
+            url,
+            response.status_code,
+            response.ok,
+            elapsed_ms,
+            self._get_response_body(response),
         )
 
     def _log_request_error(self, event_type, request_id, attempt, url, elapsed_ms, error):
@@ -297,7 +324,18 @@ class LLMClient:
 
         return payload
 
-    def _post_chat(self, payload, request_id=None, attempt=1):
+    def _build_stream_payload(self, payload):
+        stream_payload = dict(payload)
+        stream_payload["stream"] = True
+        if (
+            self.tool_stream_supported
+            and self._is_zhipu_llm()
+            and stream_payload.get("tools")
+        ):
+            stream_payload["tool_stream"] = True
+        return stream_payload
+
+    def _post_chat(self, payload, request_id=None, attempt=1, stream=False):
         url = f"{self.base_url}{self.chat_endpoint}"
         request_id = request_id or str(uuid4())
         self._log_request("llm_request", request_id, attempt, url, payload)
@@ -308,6 +346,7 @@ class LLMClient:
                 headers=self._build_headers(),
                 json=payload,
                 timeout=self.timeout,
+                stream=stream,
             )
         except requests.RequestException as exc:
             self._log_request_error(
@@ -320,14 +359,20 @@ class LLMClient:
             )
             raise
 
-        self._log_response(
-            "llm_response",
-            request_id,
-            attempt,
-            url,
-            response,
-            time.perf_counter() - started_at,
-        )
+        elapsed_ms = time.perf_counter() - started_at
+        response._zhihuishu_request_id = request_id
+        response._zhihuishu_attempt = attempt
+        response._zhihuishu_url = url
+        response._zhihuishu_elapsed_ms = elapsed_ms
+        if not stream or not response.ok:
+            self._log_response(
+                "llm_response",
+                request_id,
+                attempt,
+                url,
+                response,
+                elapsed_ms,
+            )
         return response
 
     @staticmethod
@@ -388,6 +433,7 @@ class LLMClient:
         payload = self._build_web_search_payload(query)
         request_id = payload.get("request_id") or str(uuid4())
         self._log_request("web_search_request", request_id, 1, url, payload)
+        log_message("正在联网搜索...")
         started_at = time.perf_counter()
         try:
             response = self.session.post(
@@ -481,24 +527,36 @@ class LLMClient:
         return prepared_query
 
     @staticmethod
+    def _extract_text_segments(value):
+        if isinstance(value, str):
+            return [value]
+
+        if isinstance(value, dict):
+            text = value.get("text")
+            if isinstance(text, str):
+                return [text]
+            return []
+
+        if isinstance(value, list):
+            parts = []
+            for item in value:
+                parts.extend(LLMClient._extract_text_segments(item))
+            return parts
+
+        return []
+
+    @staticmethod
+    def _extract_stream_text(value):
+        return "".join(LLMClient._extract_text_segments(value))
+
+    @staticmethod
     def _extract_text_content(message):
         content = message.get("content", "")
         if isinstance(content, str):
             return content.strip()
 
-        if isinstance(content, list):
-            parts = []
-            for item in content:
-                if isinstance(item, str):
-                    parts.append(item)
-                    continue
-
-                if not isinstance(item, dict):
-                    continue
-
-                text = item.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
+        if isinstance(content, (dict, list)):
+            parts = LLMClient._extract_text_segments(content)
             return "\n".join(part.strip() for part in parts if part and part.strip()).strip()
 
         return ""
@@ -508,17 +566,96 @@ class LLMClient:
         reasoning_content = message.get("reasoning_content", "")
         if isinstance(reasoning_content, str):
             return reasoning_content.strip()
-        if isinstance(reasoning_content, list):
-            parts = []
-            for item in reasoning_content:
-                if isinstance(item, str):
-                    parts.append(item)
-                elif isinstance(item, dict):
-                    text = item.get("text")
-                    if isinstance(text, str):
-                        parts.append(text)
+        if isinstance(reasoning_content, (dict, list)):
+            parts = LLMClient._extract_text_segments(reasoning_content)
             return "\n".join(part.strip() for part in parts if part and part.strip()).strip()
         return ""
+
+    @staticmethod
+    def _extract_tool_calls(message):
+        tool_calls = message.get("tool_calls", [])
+        if isinstance(tool_calls, list):
+            return [item for item in tool_calls if isinstance(item, dict)]
+        if isinstance(tool_calls, dict):
+            return [tool_calls]
+        return []
+
+    @staticmethod
+    def _is_web_search_tool_call(tool_call):
+        tool_type = LLMClient._stringify(tool_call.get("type")).lower()
+        if tool_type == "web_search":
+            return True
+        if isinstance(tool_call.get("web_search"), dict):
+            return True
+
+        function = tool_call.get("function", {})
+        if not isinstance(function, dict):
+            return False
+
+        function_name = LLMClient._stringify(function.get("name")).lower()
+        return "web_search" in function_name or function_name.endswith("search")
+
+    @staticmethod
+    def _choice_contains_web_search_signal(choice):
+        for key in ("delta", "message"):
+            payload = choice.get(key, {})
+            if not isinstance(payload, dict):
+                continue
+            for tool_call in LLMClient._extract_tool_calls(payload):
+                if LLMClient._is_web_search_tool_call(tool_call):
+                    return True
+        return False
+
+    @staticmethod
+    def _iter_sse_data_lines(response):
+        pending_payload = ""
+        for raw_line in response.iter_lines(decode_unicode=False):
+            if raw_line is None:
+                continue
+
+            if isinstance(raw_line, bytes):
+                line = raw_line.decode("utf-8", errors="replace").strip("\r")
+            else:
+                line = str(raw_line).strip("\r")
+
+            if not line:
+                if pending_payload:
+                    yield pending_payload
+                    pending_payload = ""
+                continue
+
+            if line.startswith(":"):
+                continue
+
+            if line.startswith("data:"):
+                payload = line[5:].lstrip()
+                if payload == "[DONE]":
+                    if pending_payload:
+                        yield pending_payload
+                        pending_payload = ""
+                    yield payload
+                    continue
+
+                if pending_payload:
+                    pending_payload = f"{pending_payload}\n{payload}"
+                else:
+                    pending_payload = payload
+
+                # 有些兼容服务不会严格发送 SSE 空行分隔，这里在 JSON 完整时提前产出。
+                try:
+                    json.loads(pending_payload)
+                except ValueError:
+                    continue
+                yield pending_payload
+                pending_payload = ""
+
+        if pending_payload:
+            yield pending_payload
+
+    @staticmethod
+    def _is_stream_response(response):
+        content_type = response.headers.get("Content-Type", "")
+        return "text/event-stream" in content_type.lower()
 
     @staticmethod
     def _should_retry_with_temperature_one(response_text, payload):
@@ -587,14 +724,218 @@ class LLMClient:
             "reasoning_content": self._extract_reasoning_content(message),
         }
 
+    @staticmethod
+    def _should_retry_without_stream(response_text):
+        text = response_text.lower()
+        if "stream" not in text:
+            return False
+
+        unsupported_markers = (
+            "not support",
+            "unsupported",
+            "unknown",
+            "invalid",
+            "not allowed",
+            "不支持",
+            "未知",
+            "非法",
+            "无效",
+        )
+        return any(marker in text for marker in unsupported_markers)
+
+    @staticmethod
+    def _should_retry_without_tool_stream(response_text):
+        text = response_text.lower()
+        if "tool_stream" not in text:
+            return False
+
+        unsupported_markers = (
+            "not support",
+            "unsupported",
+            "unknown",
+            "invalid",
+            "not allowed",
+            "不支持",
+            "未知",
+            "非法",
+            "无效",
+        )
+        return any(marker in text for marker in unsupported_markers)
+
+    def _log_stream_response_body(self, response, body):
+        self._log_response_payload(
+            "llm_response",
+            getattr(response, "_zhihuishu_request_id", ""),
+            getattr(response, "_zhihuishu_attempt", 1),
+            getattr(response, "_zhihuishu_url", ""),
+            response.status_code,
+            response.ok,
+            getattr(response, "_zhihuishu_elapsed_ms", 0),
+            body,
+        )
+
+    def _emit_reasoning_content(self, reasoning_content):
+        if not reasoning_content:
+            return
+
+        reasoning_stream = create_live_stream(DEFAULT_REASONING_STREAM_TITLE)
+        try:
+            reasoning_stream.write(reasoning_content)
+        finally:
+            reasoning_stream.finish()
+
+    def _consume_stream_response(self, response):
+        content_parts = []
+        reasoning_parts = []
+        finish_reason = None
+        last_event = {}
+        last_usage = None
+        search_status_shown = False
+        reasoning_stream = create_live_stream(DEFAULT_REASONING_STREAM_TITLE)
+
+        try:
+            for data_line in self._iter_sse_data_lines(response):
+                if data_line == "[DONE]":
+                    break
+
+                try:
+                    event = json.loads(data_line)
+                except ValueError as exc:
+                    raise RuntimeError(f"无法解析流式响应片段: {data_line}") from exc
+
+                if isinstance(event, dict):
+                    last_event = event
+                    usage = event.get("usage")
+                    if isinstance(usage, dict):
+                        last_usage = usage
+
+                choices = event.get("choices", [])
+                if not choices:
+                    continue
+
+                choice = choices[0]
+                finish_reason = choice.get("finish_reason") or finish_reason
+
+                if not search_status_shown and self._choice_contains_web_search_signal(choice):
+                    log_message("正在联网搜索...")
+                    search_status_shown = True
+
+                delta = choice.get("delta", {})
+                if not isinstance(delta, dict):
+                    delta = choice.get("message", {})
+                    if not isinstance(delta, dict):
+                        delta = {}
+
+                reasoning_chunk = self._extract_stream_text(
+                    delta.get("reasoning_content", delta.get("reasoning", delta.get("thinking", "")))
+                )
+                if reasoning_chunk:
+                    reasoning_parts.append(reasoning_chunk)
+                    reasoning_stream.write(reasoning_chunk)
+
+                content_chunk = self._extract_stream_text(delta.get("content", ""))
+                if content_chunk:
+                    content_parts.append(content_chunk)
+        finally:
+            reasoning_stream.finish()
+            response.close()
+
+        response_data = {
+            "choices": [
+                {
+                    "finish_reason": finish_reason,
+                    "message": {
+                        "content": "".join(content_parts),
+                        "reasoning_content": "".join(reasoning_parts),
+                    },
+                }
+            ]
+        }
+        for key in ("id", "model", "created", "request_id"):
+            value = last_event.get(key)
+            if value is not None:
+                response_data[key] = value
+        if last_usage:
+            response_data["usage"] = last_usage
+
+        self._log_stream_response_body(response, response_data)
+        return self._parse_response(response_data)
+
+    def _execute_non_stream_chat_attempt(self, payload, request_id, attempt):
+        response = self._post_chat(payload, request_id=request_id, attempt=attempt)
+        if not response.ok:
+            response_text = response.text
+            response.close()
+            return {"ok": False, "text": response_text}
+
+        response_data = response.json()
+        response.close()
+        parsed = self._parse_response(response_data)
+        if parsed["reasoning_content"]:
+            self._emit_reasoning_content(parsed["reasoning_content"])
+        return {"ok": True, "parsed": parsed}
+
+    def _execute_stream_chat_attempt(self, payload, request_id, attempt):
+        stream_payload = self._build_stream_payload(payload)
+        response = self._post_chat(
+            stream_payload,
+            request_id=request_id,
+            attempt=attempt,
+            stream=True,
+        )
+        if not response.ok:
+            response_text = response.text
+            response.close()
+            if stream_payload.get("tool_stream") and self._should_retry_without_tool_stream(
+                response_text
+            ):
+                self.tool_stream_supported = False
+                self._warn_once(
+                    "当前模型服务不支持 tool_stream，已回退为普通流式输出；联网搜索状态可能无法实时显示。",
+                    flag_name="tool_stream_warning_shown",
+                    event_type="llm_tool_stream_warning",
+                )
+                return self._execute_stream_chat_attempt(payload, request_id, attempt)
+
+            if self._should_retry_without_stream(response_text):
+                self.stream_supported = False
+                self._warn_once(
+                    "当前模型服务不支持 stream，已回退为非流式响应；无法实时输出思维链。",
+                    flag_name="stream_warning_shown",
+                    event_type="llm_stream_warning",
+                )
+                return self._execute_non_stream_chat_attempt(payload, request_id, attempt)
+
+            return {"ok": False, "text": response_text}
+
+        if self._is_stream_response(response):
+            return {
+                "ok": True,
+                "parsed": self._consume_stream_response(response),
+            }
+
+        response_data = response.json()
+        response.close()
+        self._log_stream_response_body(response, response_data)
+        parsed = self._parse_response(response_data)
+        if parsed["reasoning_content"]:
+            self._emit_reasoning_content(parsed["reasoning_content"])
+        return {"ok": True, "parsed": parsed}
+
+    def _execute_chat_attempt(self, payload, request_id, attempt):
+        log_message("正在思考中...")
+        if self.stream_supported:
+            return self._execute_stream_chat_attempt(payload, request_id, attempt)
+        return self._execute_non_stream_chat_attempt(payload, request_id, attempt)
+
     def get_response(self, query):
         query = self._prepare_query(query)
         request_id = str(uuid4())
         payload = self._build_payload(query)
         attempt = 1
-        response = self._post_chat(payload, request_id=request_id, attempt=attempt)
+        result = self._execute_chat_attempt(payload, request_id, attempt)
 
-        if not response.ok and self._should_retry_with_temperature_one(response.text, payload):
+        if not result["ok"] and self._should_retry_with_temperature_one(result["text"], payload):
             attempt += 1
             self._log_event(
                 "llm_retry",
@@ -604,15 +945,12 @@ class LLMClient:
                 reason="service_only_accepts_temperature_1",
             )
             payload = self._build_payload(query, overrides={"temperature": 1})
-            response = self._post_chat(payload, request_id=request_id, attempt=attempt)
+            result = self._execute_chat_attempt(payload, request_id, attempt)
 
-        try:
-            response.raise_for_status()
-        except requests.HTTPError as exc:
-            raise RuntimeError(f"LLM API 请求失败: {response.text}") from exc
+        if not result["ok"]:
+            raise RuntimeError(f"LLM API 请求失败: {result['text']}")
 
-        response_data = response.json()
-        parsed = self._parse_response(response_data)
+        parsed = result["parsed"]
         if parsed["content"]:
             return parsed["content"]
 
@@ -630,14 +968,11 @@ class LLMClient:
                 reason="empty_content_and_finish_reason_length",
                 max_tokens=retry_payload.get("max_tokens"),
             )
-            retry_response = self._post_chat(retry_payload, request_id=request_id, attempt=attempt)
-            try:
-                retry_response.raise_for_status()
-            except requests.HTTPError as exc:
-                raise RuntimeError(f"LLM API 请求失败: {retry_response.text}") from exc
+            retry_result = self._execute_chat_attempt(retry_payload, request_id, attempt)
+            if not retry_result["ok"]:
+                raise RuntimeError(f"LLM API 请求失败: {retry_result['text']}")
 
-            response_data = retry_response.json()
-            parsed = self._parse_response(response_data)
+            parsed = retry_result["parsed"]
             if parsed["content"]:
                 return parsed["content"]
 
@@ -653,7 +988,7 @@ class LLMClient:
             )
             return fallback_answer
 
-        raise RuntimeError(f"LLM API 响应中未提取到文本内容: {response_data}")
+        raise RuntimeError("LLM API 响应中未提取到文本内容。")
 
 
 def load_config(config_path=CONFIG_PATH):
