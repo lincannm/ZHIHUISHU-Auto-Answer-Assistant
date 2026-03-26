@@ -1,6 +1,7 @@
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from cnocr import CnOcr
+from answer_context import build_answer_prompt, get_course_name
 from browser_session import get_authenticated_driver, save_login_state
 from model import get_model, should_repeat_answers
 import time
@@ -37,19 +38,8 @@ def text_orc(image='question.png'):
     extracted_text = '\n'.join([item['text'] for item in ocr_results if item['text'].strip()])
     return extracted_text
 
-def get_answer(question):
-    prompt = f"""
-请仔细阅读以下题目并思考分析，根据题目类型，严格按照以下要求作答：
-
-选择题（单选）： 如果题目为单选题，请从选项中选择一个正确的答案，并仅输出该选项（A、B、C或D），不提供任何额外解释。
-选择题（多选）： 如果题目为多选题，请选择所有正确的选项，并仅输出所有正确选项的字母，用','分隔（如A,C），按字母顺序排列，不提供任何额外解释。
-判断题： 如果题目为判断题，请分析题目并仅输出 "对" 或 "错"，不提供任何额外解释。
-请遵循以上规则直接给出你的答案。
-
-题目：
-{question}
-
-你的答案："""
+def get_answer(question, course_name=""):
+    prompt = build_answer_prompt(question, course_name)
     if not REPEAT_UNTIL_DUPLICATE:
         cur_answer = model.get_response(prompt)
         print(f'大模型第1次输出：{cur_answer}')
@@ -131,13 +121,13 @@ def get_submit_confirm_button(driver, timeout=20):
     return wait.until(find_submit_confirm_button)
 
 @error_handler
-def answer(driver, index):
+def answer(driver, index, course_name=""):
     question_element = get_question_element(driver, index)
     question_element.screenshot('question.png')
     question_str = text_orc()
     print(f'第{index+1}题：{question_str}')
 
-    answer = get_answer(question_str) # answer 形如'A'  或 'B,D' 或 '对' 
+    answer = get_answer(question_str, course_name) # answer 形如'A'  或 'B,D' 或 '对' 
     print(f'最终答案：{answer}')
 
     # 判断题中对与错的顺序可能不一样
@@ -161,9 +151,15 @@ def answer(driver, index):
             time.sleep(random.uniform(0.2, 0.5))
 
 def auto_answer(driver):
+    course_name = get_course_name(driver)
+    if course_name:
+        print(f'课程名称：{course_name}')
+    else:
+        print('未识别到课程名称，将仅按题目内容提问。')
+
     index = 0
     while True:
-        answer(driver, index)
+        answer(driver, index, course_name)
         # 下一题
         next_button = get_next_button(driver)
         if next_button.text.strip() == '保存':
