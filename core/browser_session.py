@@ -3,12 +3,14 @@ import os
 import random
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
 
 from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_playwright
 
 from .console import log_message
+from .model import load_config
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -18,6 +20,24 @@ COOKIE_FIELDS = {"name", "value", "path", "domain", "secure", "httpOnly", "expir
 DEFAULT_BROWSER_START_TIMEOUT_MS = 25_000
 DEFAULT_NAVIGATION_TIMEOUT_MS = 30_000
 DEFAULT_ACTION_TIMEOUT_MS = 20_000
+DEFAULT_AUTO_LOGIN_WAIT_SECONDS = 8
+DEFAULT_AUTH_STATE_SETTLE_SECONDS = 6
+PHONE_LOGIN_TAB_SELECTOR = "#qSignin"
+PHONE_LOGIN_USERNAME_SELECTOR = "#lUsername"
+PHONE_LOGIN_PASSWORD_SELECTOR = "#lPassword"
+PHONE_LOGIN_SUBMIT_SELECTOR = ".switch-wrap-signin.active .wall-sub-btn"
+LOGIN_PAGE_INDICATOR_SELECTORS = (
+    PHONE_LOGIN_USERNAME_SELECTOR,
+    PHONE_LOGIN_PASSWORD_SELECTOR,
+    PHONE_LOGIN_TAB_SELECTOR,
+    PHONE_LOGIN_SUBMIT_SELECTOR,
+    'iframe[src*="dun.163"]',
+    'iframe[src*="cstaticdun"]',
+)
+APP_READY_INDICATOR_SELECTORS = (
+    'xpath=//div[contains(@class, "examPaper_subject")]',
+    'xpath=//div[@id="examBox"]',
+)
 
 
 @dataclass
@@ -64,6 +84,143 @@ def _looks_like_login_page(current_url):
     host = parsed.hostname or ""
     path = parsed.path.lower()
     return "passport.zhihuishu.com" in host or "login" in path
+
+
+def _has_visible_selector(page, selector):
+    try:
+        locator = page.locator(selector)
+        count = locator.count()
+    except Exception:
+        return False
+
+    for index in range(count):
+        try:
+            if locator.nth(index).is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _has_any_visible_selector(page, selectors):
+    return any(_has_visible_selector(page, selector) for selector in selectors)
+
+
+def _get_auth_state(page):
+    current_url = ""
+    try:
+        current_url = page.url
+    except Exception:
+        current_url = ""
+
+    app_ready = _has_any_visible_selector(page, APP_READY_INDICATOR_SELECTORS)
+    if app_ready:
+        return "ready"
+
+    if _looks_like_login_page(current_url):
+        return "login"
+
+    if _has_any_visible_selector(page, LOGIN_PAGE_INDICATOR_SELECTORS):
+        return "login"
+
+    return "unknown"
+
+
+def is_login_page(page):
+    return _get_auth_state(page) == "login"
+
+
+def _wait_for_auth_surface(page, timeout_seconds=DEFAULT_AUTH_STATE_SETTLE_SECONDS):
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        auth_state = _get_auth_state(page)
+        if auth_state != "unknown":
+            return auth_state
+        time.sleep(0.25)
+
+    return _get_auth_state(page)
+
+
+def _normalize_config_value(value):
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
+
+
+@lru_cache(maxsize=1)
+def _load_login_config():
+    try:
+        config = load_config()
+    except Exception as exc:
+        log_message(f"读取登录配置失败，已跳过自动登录：{exc}")
+        return {}
+
+    zhihuishu_config = config.get("zhihuishu", {})
+    if not isinstance(zhihuishu_config, dict):
+        return {}
+
+    login_config = zhihuishu_config.get("login", {})
+    if not isinstance(login_config, dict):
+        return {}
+
+    return login_config
+
+
+def _get_phone_login_credentials():
+    login_config = _load_login_config()
+    if not login_config.get("enabled", False):
+        return "", "", False
+
+    username = _normalize_config_value(login_config.get("username"))
+    password = _normalize_config_value(login_config.get("password"))
+    auto_submit = login_config.get("auto_submit", True)
+
+    placeholders = {"YOUR_PHONE_NUMBER", "YOUR_PASSWORD"}
+    if username in placeholders:
+        username = ""
+    if password in placeholders:
+        password = ""
+
+    return username, password, bool(auto_submit)
+
+
+def _wait_for_login_result(page, timeout_seconds=DEFAULT_AUTO_LOGIN_WAIT_SECONDS):
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        if not is_login_page(page):
+            return True
+        time.sleep(0.25)
+    return not is_login_page(page)
+
+
+def _try_auto_login(page):
+    if not is_login_page(page):
+        return "already_authenticated"
+
+    username, password, auto_submit = _get_phone_login_credentials()
+    if not username or not password:
+        return "skipped"
+
+    try:
+        page.locator(PHONE_LOGIN_TAB_SELECTOR).click()
+        page.locator(PHONE_LOGIN_USERNAME_SELECTOR).wait_for(state="visible")
+        page.locator(PHONE_LOGIN_USERNAME_SELECTOR).fill(username)
+        page.locator(PHONE_LOGIN_PASSWORD_SELECTOR).fill(password)
+        log_message("已从配置文件自动填充智慧树手机号和密码。")
+
+        if not auto_submit:
+            return "filled"
+
+        page.locator(PHONE_LOGIN_SUBMIT_SELECTOR).first.click()
+        log_message("已根据配置自动点击登录。")
+        if _wait_for_login_result(page):
+            return "completed"
+        return "submitted"
+    except Exception as exc:
+        log_message(f"自动登录失败，已回退为手动登录：{exc}")
+        return "failed"
 
 
 def _first_existing_path(candidates):
@@ -234,7 +391,7 @@ def create_browser_session(target_url):
 
     _sleep()
 
-    if restored_from_storage and not _looks_like_login_page(page.url):
+    if restored_from_storage and not is_login_page(page):
         cookie_count = len(context.cookies())
         log_message(f"已恢复本地登录状态，载入 {cookie_count} 个 cookie。")
 
@@ -247,7 +404,7 @@ def create_browser_session(target_url):
 
 
 def save_login_state(session):
-    if _looks_like_login_page(session.page.url):
+    if is_login_page(session.page):
         log_message("当前仍处于登录页，已跳过登录状态保存。")
         return
 
@@ -263,15 +420,36 @@ def save_login_state(session):
 
 def get_authenticated_session(target_url):
     session = create_browser_session(target_url)
-    if not _looks_like_login_page(session.page.url):
+    auth_surface = _wait_for_auth_surface(session.page)
+    if auth_surface == "login" and not _looks_like_login_page(session.page.url):
+        log_message("检测到页面仍显示登录表单，将先等待登录完成。")
+
+    if not is_login_page(session.page):
         return session
 
-    input("未检测到可用登录状态，请登录后按回车继续...")
+    auto_login_status = _try_auto_login(session.page)
+    if not is_login_page(session.page):
+        save_login_state(session)
+        return session
+
+    prompt_text = "未检测到可用登录状态，请登录后按回车继续..."
+    if auto_login_status == "filled":
+        prompt_text = "已自动填充手机号和密码，请确认后登录；如页面要求滑块或验证码，也请在浏览器完成后按回车继续..."
+    elif auto_login_status == "submitted":
+        prompt_text = "已自动提交登录请求；如页面仍要求滑块或验证码，请完成后按回车继续..."
+
+    while is_login_page(session.page):
+        input(prompt_text)
+        if _wait_for_login_result(session.page, timeout_seconds=2):
+            break
+        prompt_text = "当前仍停留在登录页，请先完成登录或验证码，再按回车继续..."
+
     save_login_state(session)
 
     scheme, host = _get_target_parts(target_url)
     if scheme and host:
         session.page.goto(target_url, wait_until="domcontentloaded")
         _sleep()
+        _wait_for_auth_surface(session.page)
 
     return session

@@ -16,7 +16,7 @@
 1. 读取 `llm_config.json`
 2. 初始化统一的 LLM 客户端
 3. Playwright 尝试恢复本地保存的智慧树登录状态
-4. 若 cookie 失效或首次运行，则用户手动登录一次后继续
+4. 若 cookie 失效或首次运行，则优先尝试使用配置文件中的手机号/密码自动填充并点击登录；若仍需滑块、短信或图片验证码，再由用户补充完成
 5. 脚本对题目区域截图
 6. `cnocr` 识别题目文字
 7. 将课程名称和题目一起发送给 LLM
@@ -92,6 +92,14 @@ python -m playwright install chromium
         "include_link": false
       }
     }
+  },
+  "zhihuishu": {
+    "login": {
+      "enabled": false,
+      "username": "YOUR_PHONE_NUMBER",
+      "password": "YOUR_PASSWORD",
+      "auto_submit": true
+    }
   }
 }
 ```
@@ -121,6 +129,10 @@ python -m playwright install chromium
 - `tools.web_search.tool_choice`: 工具选择策略，通常用 `auto`
 - `tools.web_search.prompt_template`: 独立搜索模式下，如何把搜索结果注入到最终提问中
 - `tools.web_search.options`: 智谱 Web Search API 的配置项
+- `zhihuishu.login.enabled`: 是否启用智慧树手机号自动登录
+- `zhihuishu.login.username`: 智慧树登录手机号
+- `zhihuishu.login.password`: 智慧树登录密码
+- `zhihuishu.login.auto_submit`: 自动填充后是否自动点击登录，默认 `true`
 - `request.temperature`: 某些模型只接受 `1`，如果服务端报温度参数错误，优先改成 `1`
 - `request.max_tokens`: 推理模型如果频繁出现 `finish_reason = length`，需要适当调大
 
@@ -151,6 +163,8 @@ python main.py
 
 运行后会先让你交互式选择模式，再输入页面 URL。脚本会打开浏览器并复用本地保存的登录态。
 
+如果当前页面或跳转结果落在 `https://passport.zhihuishu.com/login`，并且 `llm_config.json` 中配置了 `zhihuishu.login.username` / `password`，脚本会自动填充手机号密码，并自动点击“登录”。如果智慧树仍要求滑块、图片验证码或短信验证，终端会提示你在浏览器里补完后继续。
+
 可选模式：
 
 - `1` / `manual` / `手动模式`
@@ -177,7 +191,7 @@ python main.py
 
 模型信息不再通过命令行交互输入，而是统一从 `llm_config.json` 读取。
 
-首次运行或登录态失效时，脚本会提示你手动登录；登录成功后会自动把 Playwright 登录状态保存到 `data/zhihuishu_storage_state.json`。下次运行会先尝试恢复这份登录态，能直接进入答题页时就不再需要重复登录。如果本地还保留旧版 `data/zhihuishu_cookies.json`，当前版本也会自动尝试导入一次。
+首次运行或登录态失效时，脚本会先尝试用配置文件里的手机号密码自动登录；如果自动提交后仍需二次验证，再提示你手动完成。登录成功后会自动把 Playwright 登录状态保存到 `data/zhihuishu_storage_state.json`。下次运行会先尝试恢复这份登录态，能直接进入答题页时就不再需要重复登录。如果本地还保留旧版 `data/zhihuishu_cookies.json`，当前版本也会自动尝试导入一次。
 
 默认会把 LLM 请求、响应、重试和错误同时输出到控制台与 `data/logs/llm.log`。日志中会保留完整 prompt / response（超长内容按 `logging.max_body_chars` 截断），并对 `api_key` / `Authorization` 做脱敏处理。
 

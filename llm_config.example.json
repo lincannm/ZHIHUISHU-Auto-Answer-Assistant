@@ -40,5 +40,13 @@
         "content_size": "medium"
       }
     }
+  },
+  "zhihuishu": {
+    "login": {
+      "enabled": false,
+      "username": "YOUR_PHONE_NUMBER",
+      "password": "YOUR_PASSWORD",
+      "auto_submit": true
+    }
   }
 }

@@ -6,3 +6,4 @@ llm_config.json
 data/zhihuishu_cookies.json
 data/zhihuishu_storage_state.json
 data/logs/
+test1.py

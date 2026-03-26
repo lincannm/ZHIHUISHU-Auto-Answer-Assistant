@@ -8,6 +8,7 @@ from pathlib import Path
 from cnocr import CnOcr
 
 from .answer_context import build_answer_prompt, get_course_name
+from .browser_session import is_login_page
 from .console import log_message
 from .model import get_model, should_repeat_answers
 
@@ -274,8 +275,13 @@ def get_viewport_question_element(page, visible_index, timeout=20):
 
 
 def get_current_question_element(page, timeout=20):
+    def find_current_question():
+        if is_login_page(page):
+            raise RuntimeError("当前页面仍停留在登录页，请先完成登录或验证码，再开始答题。")
+        return _find_current_question(page)
+
     return _wait_until(
-        lambda: _find_current_question(page),
+        find_current_question,
         timeout=timeout,
         timeout_message="等待当前题目出现超时。",
     )
@@ -429,6 +435,9 @@ def answer(page, index, course_name=""):
 
 
 def auto_answer(page):
+    if is_login_page(page):
+        raise RuntimeError("当前页面仍停留在登录页，请先完成登录或验证码，再开始答题。")
+
     ensure_answer_response_listener(page)
     course_name = get_course_name(page)
     if course_name:
