@@ -8,6 +8,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 
 from .answer_context import build_answer_prompt, get_course_name
+from .console import log_message
 from .model import get_model, should_repeat_answers
 
 
@@ -31,7 +32,7 @@ def error_handler(func):
             try:
                 return func(*args, **kwargs)
             except Exception as exc:
-                print(f"函数 {func.__name__} 发生错误: {exc}")
+                log_message(f"函数 {func.__name__} 发生错误: {exc}")
                 input("请修复错误并按回车键继续...")
 
     return wrapper
@@ -46,22 +47,30 @@ def text_ocr(image=QUESTION_SCREENSHOT_PATH):
     return extracted_text
 
 
-def get_answer(question, course_name=""):
+def get_answer_with_attempts(question, course_name=""):
     prompt = build_answer_prompt(question, course_name)
     if not REPEAT_UNTIL_DUPLICATE:
         cur_answer = model.get_response(prompt)
-        print(f"大模型第1次输出：{cur_answer}")
-        return cur_answer
+        return cur_answer, [cur_answer]
 
+    answer_attempts = []
     answer_list = []
-    index = 0
     while True:
         cur_answer = model.get_response(prompt)
-        print(f"大模型第{index + 1}次输出：{cur_answer}")
+        answer_attempts.append(cur_answer)
         if cur_answer in answer_list:
-            return cur_answer
+            return cur_answer, answer_attempts
         answer_list.append(cur_answer)
-        index += 1
+
+
+def log_answer_attempts(answer_attempts):
+    for index, cur_answer in enumerate(answer_attempts, start=1):
+        log_message(f"大模型第{index}次输出：{cur_answer}")
+
+
+def get_answer(question, course_name=""):
+    final_answer, _ = get_answer_with_attempts(question, course_name)
+    return final_answer
 
 
 def capture_question_text(question_element, image_path=QUESTION_SCREENSHOT_PATH):
@@ -73,7 +82,7 @@ def capture_question_text(question_element, image_path=QUESTION_SCREENSHOT_PATH)
 
 def solve_question_element(question_element, course_name="", image_path=QUESTION_SCREENSHOT_PATH):
     question_text = capture_question_text(question_element, image_path)
-    answer = get_answer(question_text, course_name)
+    answer, _ = get_answer_with_attempts(question_text, course_name)
     return question_text, answer
 
 
@@ -271,18 +280,20 @@ def apply_answer(question_element, answer):
 @error_handler
 def answer(driver, index, course_name=""):
     question_element = get_question_element(driver, index)
-    question_text, final_answer = solve_question_element(question_element, course_name)
-    print(f"第{index + 1}题：{question_text}")
-    print(f"最终答案：{final_answer}")
+    question_text = capture_question_text(question_element)
+    log_message(f"第{index + 1}题：{question_text}")
+    final_answer, answer_attempts = get_answer_with_attempts(question_text, course_name)
+    log_answer_attempts(answer_attempts)
+    log_message(f"最终答案：{final_answer}")
     apply_answer(question_element, final_answer)
 
 
 def auto_answer(driver):
     course_name = get_course_name(driver)
     if course_name:
-        print(f"课程名称：{course_name}")
+        log_message(f"课程名称：{course_name}")
     else:
-        print("未识别到课程名称，将仅按题目内容提问。")
+        log_message("未识别到课程名称，将仅按题目内容提问。")
 
     index = 0
     while True:
@@ -294,7 +305,7 @@ def auto_answer(driver):
             time.sleep(random.uniform(0.5, 1))
             confirm_button = get_submit_confirm_button(driver)
             confirm_button.click()
-            print("提交成功")
+            log_message("提交成功")
             return
         next_button.click()
         time.sleep(random.uniform(0.5, 1))

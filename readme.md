@@ -136,13 +136,21 @@ pip install -r requirements.txt
 
 ## 运行
 
-### 手动模式
+### 统一入口
 
 ```bash
-python manual_mode.py
+python main.py
 ```
 
-运行后输入答题页 URL，脚本会打开浏览器并复用本地保存的登录态。进入手动模式后，脚本不会自动选项、自动切题或自动提交，只会在你输入命令时读取当前正在显示的题目并调用 AI 返回答案。
+运行后会先让你交互式选择模式，再输入页面 URL。脚本会打开浏览器并复用本地保存的登录态。
+
+可选模式：
+
+- `1` / `manual` / `手动模式`
+- `2` / `onepage` / `单个答题页`
+- `3` / `tests` / `答题列表页`
+
+其中手动模式下，脚本不会自动选项、自动切题或自动提交，只会在你输入命令时读取当前正在显示的题目并调用 AI 返回答案。
 
 常用命令：
 
@@ -160,19 +168,7 @@ python manual_mode.py
 - 这个页面通常一次只展开一道题，切题仍然需要你在浏览器里手动操作
 - 手动模式仍然依赖 OCR 读取题目区域，OCR 结果可能受页面样式和字体影响
 
-### 单个测试页
-
-```bash
-python onepage.py
-```
-
-### 测试列表页
-
-```bash
-python auto_answer_question.py
-```
-
-运行后只需要输入页面 URL。模型信息不再通过命令行交互输入，而是统一从 `llm_config.json` 读取。
+模型信息不再通过命令行交互输入，而是统一从 `llm_config.json` 读取。
 
 首次运行或登录态失效时，脚本会提示你手动登录；登录成功后会自动把智慧树 cookie 保存到 `data/zhihuishu_cookies.json`。下次运行会先尝试恢复这份登录态，能直接进入答题页时就不再需要重复登录。
 
@@ -180,10 +176,12 @@ python auto_answer_question.py
 
 ## 文件说明
 
-- `manual_mode.py`: 手动模式入口，只在收到命令时回答当前题目，不做自动点击或提交
-- `onepage.py`: 对单个测试页答题
-- `auto_answer_question.py`: 对测试列表页中的所有测试顺序答题
+- `main.py`: 统一入口，启动后交互式选择模式并输入 URL
+- `manual_mode.py`: 兼容旧用法的薄包装，内部转调统一入口的手动模式
+- `onepage.py`: 兼容旧用法的薄包装，内部转调统一入口的单个答题页模式
+- `auto_answer_question.py`: 兼容旧用法的薄包装，内部转调统一入口的答题列表页模式
 - `core/`: 共享模块包
+  - `core/workflows.py`: 统一收口手动模式、单个答题页和答题列表页三种 workflow
   - `core/browser_session.py`: 统一管理 Selenium 浏览器初始化与智慧树登录态 cookie 的保存/恢复
   - `core/question_flow.py`: 共享的题目识别、OCR、AI 求答和自动答题流程
   - `core/model.py`: 统一 LLM 客户端和配置加载逻辑

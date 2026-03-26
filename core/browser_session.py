@@ -7,6 +7,8 @@ from urllib.parse import urlparse
 
 from selenium import webdriver
 
+from .console import log_message
+
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 COOKIE_STORE_PATH = ROOT_DIR / "data" / "zhihuishu_cookies.json"
@@ -101,12 +103,12 @@ def create_driver():
 
 def save_login_state(driver):
     if _looks_like_login_page(driver.current_url):
-        print("当前仍处于登录页，已跳过登录状态保存。")
+        log_message("当前仍处于登录页，已跳过登录状态保存。")
         return
 
     cookies = driver.get_cookies()
     if not cookies:
-        print("当前页面未读取到可保存的 cookie，已跳过登录状态持久化。")
+        log_message("当前页面未读取到可保存的 cookie，已跳过登录状态持久化。")
         return
 
     COOKIE_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -118,7 +120,7 @@ def save_login_state(driver):
     with COOKIE_STORE_PATH.open("w", encoding="utf-8") as file:
         json.dump(payload, file, ensure_ascii=False, indent=2)
 
-    print(f"已保存登录状态到 {COOKIE_STORE_PATH.name}")
+    log_message(f"已保存登录状态到 {COOKIE_STORE_PATH.name}")
 
 
 def restore_login_state(driver, target_url):
@@ -156,7 +158,7 @@ def restore_login_state(driver, target_url):
     if _looks_like_login_page(driver.current_url):
         return False
 
-    print(f"已恢复本地登录状态，载入 {added_count} 个 cookie。")
+    log_message(f"已恢复本地登录状态，载入 {added_count} 个 cookie。")
     return True
 
 
